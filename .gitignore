@@ -29,7 +29,7 @@ build/
 
 # Data output (large files, not synced)
 LFP_Output/
-
+test.ipynb
 # Temporary files
 *.tmp
 *.temp

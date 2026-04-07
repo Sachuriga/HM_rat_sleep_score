@@ -333,18 +333,30 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
         setStatus('Loading motion file...', [0 0 0.7]); drawnow;
         try
             motion = double(readNPY(emgFile));
-            motion = motion';      % transpose (matches original script behaviour)
-            motion = motion(:)';   % flatten to 1 x N row vector
+            motion = motion(:);    % flatten to column vector (N x 1)
 
-            % TheStateEditor uses: nFFTChunks = max(1, round((nSamples - WinLength) / winstep))
-            % where WinLength = eegFS and winstep = eegFS  (see mtchglongIn call in TheStateEditor)
+            % TheStateEditor expects 1 value per spectrogram bin (~1 per second).
+            % Compute target length using TheStateEditor's exact formula:
+            %   nFFTChunks = max(1, round((nSamples - WinLength) / winstep))
+            % where WinLength = eegFS and winstep = eegFS.
             nSamples  = length(inputData.rawEeg{1});
             targetLen = max(1, round((nSamples - eegFS) / eegFS));
 
-            if length(motion) ~= targetLen
+            if length(motion) > targetLen
+                % Motion is at full sampling rate — average into 1-second bins
+                % (same method TheStateEditor uses for accelerometer channels)
+                usable = targetLen * eegFS;
+                if length(motion) >= usable
+                    motion = motion(1:usable);
+                else
+                    motion = [motion; zeros(usable - length(motion), 1)];
+                end
+                motion = mean(reshape(motion, eegFS, targetLen), 1); % 1 x targetLen
+            else
+                % Motion already at ~1 Hz — resample to exact target length
                 origX   = linspace(0, 1, length(motion));
                 targetX = linspace(0, 1, targetLen);
-                motion  = interp1(origX, motion, targetX, 'linear');
+                motion  = interp1(origX, motion', targetX, 'linear');
             end
 
             inputData.MotionType = 'File';
