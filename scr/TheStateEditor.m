@@ -375,6 +375,11 @@ else
             catch
                 fspec{i} =[];
 
+                % 50 Hz notch filter
+                wo = 50/(eegFS/2);  bw = wo/35;
+                [b_notch, a_notch] = iirnotch(wo, bw);
+                rawEeg{i} = single(filtfilt(b_notch, a_notch, double(rawEeg{i})));
+
                 weeg{i} =  WhitenSignalIn(rawEeg{i},eegFS*2000,1);
                 [fspec{i}.spec, fspec{i}.fo, fspec{i}.to] = mtchglongIn(weeg{i}, 3072, eegFS, eegFS, 0, [], [], [], [0 200]);
                 fspec{i}.spec = single(fspec{i}.spec);
@@ -394,6 +399,12 @@ else
                 fspec{i} = LoadSpecArch(baseName, [], Chs(i), 1, 0, 3072, [0 200], 1, []);
             catch
                 fspec{i} =[];
+
+                % 50 Hz notch filter
+                wo = 50/(eegFS/2);  bw = wo/35;
+                [b_notch, a_notch] = iirnotch(wo, bw);
+                rawEeg{i} = single(filtfilt(b_notch, a_notch, double(rawEeg{i})));
+
                 weeg{i} =  WhitenSignalIn(rawEeg{i}, eegFS*2000,1);
                 [fspec{i}.spec, fspec{i}.fo, fspec{i}.to] = mtchglongIn(weeg{i}, 3072, eegFS, eegFS, 0, [], [], [], [0 200]);
                 fspec{i}.spec = single(fspec{i}.spec);
@@ -797,6 +808,7 @@ for i = 1:nCh
         set(FO.sax{i}, 'XTick', []);
     end
 end
+colormap(jet);
 
 
 
@@ -870,24 +882,25 @@ FO.eegWidthDisp = annotation('textbox', 'Units', 'Normalized');
 set(FO.eegWidthDisp, 'String', ['\bf\color{red}\fontsize{11}', num2str(FO.eegShow), ' sec'], 'Position', position.eegWidth, 'EdgeColor', 'none');
 
 
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.65, 0.135, 0.03], 'EdgeColor', 'none');
-set(a, 'String', 'Go To Second:');
+% --- Right-panel controls (packed layout) ---
+% Action / status text at top
+FO.actionDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.72, 0.135, 0.26], 'EdgeColor', 'none');
+FO.startLocDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.72, 0.135, 0.08], 'EdgeColor', 'none');
+FO.lastClickDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.70, 0.135, 0.08], 'EdgeColor', 'none');
 
-FO.gotosecondbox = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.63, 0.06, 0.025]);
+% Go To Second
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.665, 0.135, 0.028], 'EdgeColor', 'none');
+set(a, 'String', 'Go To Second:');
+FO.gotosecondbox = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.645, 0.06, 0.022]);
 set(FO.gotosecondbox, 'Callback', @goToSecond);
 
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.59, 0.135, 0.03], 'EdgeColor', 'none');
+% Window Length
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.617, 0.135, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Window Length (sec)');
-
-FO.xlimbox = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.57, 0.06, 0.025]);
+FO.xlimbox = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.597, 0.06, 0.022]);
 set(FO.xlimbox, 'Callback', {@changeXlim}, 'String', int2str(round(diff(FO.lims))));
 
-
-FO.undoButton = uicontrol('style', 'pushbutton', 'String', 'Undo State', 'Units', 'normalized', 'Position',  [0.87, 0.09, 0.1, 0.04]);
-set(FO.undoButton, 'Callback', {@undoChange});
-FO.redoButton = uicontrol('style', 'pushbutton', 'String', 'Redo State', 'Units', 'normalized', 'Position',  [0.87, 0.04, 0.1, 0.04]);
-set(FO.redoButton, 'Callback', {@redoChange});
-
+% Smoothing Window
 Woptions =  [0, 5, 10, 15, 20, 30, 45, 60];
 FO.Woptions = Woptions;
 optString = [];
@@ -895,45 +908,46 @@ for I = 1:length(Woptions)
     optString = [optString, int2str(Woptions(I)),' secs|'];
 end
 optString = optString(1:(end - 1));
-FO.hanningWDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.88, 0.38, 0.08, 0.01]);
-set(FO.hanningWDisp, 'String', optString, 'CallBack', {@ChangeSmoothingWindow}, 'Value', find(Woptions == FO.hanningW));
-hanL = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.395, 0.135, 0.03], 'EdgeColor', 'none');
+hanL = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.569, 0.135, 0.028], 'EdgeColor', 'none');
 set(hanL, 'String', 'Smoothing Window:');
+FO.hanningWDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.88, 0.549, 0.08, 0.022]);
+set(FO.hanningWDisp, 'String', optString, 'CallBack', {@ChangeSmoothingWindow}, 'Value', find(Woptions == FO.hanningW));
 
-
+% Overlay Display
 Ooptions = ['none|(5-10Hz)/(0.5-4Hz)|Choose from file'];
-
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.33, 0.1355, 0.03], 'EdgeColor', 'none');
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.521, 0.1355, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Overlay Display:');
-FO.overlayDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.8800    0.315    0.0800    0.01]);
+FO.overlayDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.88, 0.501, 0.08, 0.022]);
 set(FO.overlayDisp, 'String', Ooptions, 'CallBack', {@OverlayDisplay}, 'Value', 1);
 
+% Event #
 Eoptions = ['none|1 (0 events)|2 (0 events)|3 (0 events)|4 (0 events)|5 (0 events)|6 (0 events)(0 events)|7 (0 events)|8 (0 events)|9 (0 events)|10 (0 events)'];
-
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.26, 0.1355, 0.03], 'EdgeColor', 'none');
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.473, 0.1355, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Event #:');
-FO.eventDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.8800    0.245    0.0800    0.01]);
+FO.eventDisp = uicontrol('style', 'popup', 'Units', 'normalized', 'Position', [0.88, 0.453, 0.08, 0.022]);
 set(FO.eventDisp, 'String', Eoptions, 'CallBack', {@EventNumber}, 'Value', 2);
 
 FO.eventNum = 1;
 
-FO.actionDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.68, 0.135, 0.3], 'EdgeColor', 'none');
-FO.startLocDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.7, 0.135, 0.1], 'EdgeColor', 'none');
-FO.lastClickDisp = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.67, 0.135, 0.1], 'EdgeColor', 'none');
-FO.infoDisp = annotation('textbox', 'Position', [0.855, 0.25, 0.135, 0.3], 'EdgeColor', 'none');
+% State legend
+FO.infoDisp = annotation('textbox', 'Position', [0.855, 0.31, 0.135, 0.135], 'EdgeColor', 'none');
 
-% a = annotation('textbox', 'Position', [0.86          0.115          0.13         0.1], 'EdgeColor', 'none');
-% set(a, 'String', {'\fontsize{15}Press \bf''H''', '\rmfor help!'});
-
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.195, 0.135, 0.03], 'EdgeColor', 'none');
+% Y Range
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.275, 0.135, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Y Range 1');
-FO.ylimbox{1} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.18, 0.06, 0.025]);
+FO.ylimbox{1} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.255, 0.06, 0.022]);
 set(FO.ylimbox{1}, 'Callback', {@changeYlim}, 'String', int2str(round(diff(FO.yrange))));
 
-a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.15, 0.135, 0.03], 'EdgeColor', 'none');
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.227, 0.135, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Y Range 2');
-FO.ylimbox{2} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.13, 0.06, 0.025]);
+FO.ylimbox{2} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.207, 0.06, 0.022]);
 set(FO.ylimbox{2}, 'Callback', {@changeYlim}, 'String', int2str(round(diff(FO.yrange))));
+
+% Undo / Redo
+FO.undoButton = uicontrol('style', 'pushbutton', 'String', 'Undo State', 'Units', 'normalized', 'Position',  [0.87, 0.12, 0.1, 0.04]);
+set(FO.undoButton, 'Callback', {@undoChange});
+FO.redoButton = uicontrol('style', 'pushbutton', 'String', 'Redo State', 'Units', 'normalized', 'Position',  [0.87, 0.07, 0.1, 0.04]);
+set(FO.redoButton, 'Callback', {@redoChange});
 
 info = {};
 info{end + 1} = ['\color[rgb]{', num2str(colors.states{1}), '}1: Wake'];
