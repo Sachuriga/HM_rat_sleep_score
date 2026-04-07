@@ -229,7 +229,9 @@ end
 
 
 %% check for prior processing
-if FileExistsIn([baseName,'.eegstates.mat'])
+% If rawEeg was provided externally (e.g. from NPY loader), always recompute
+% the spectrogram so filters applied to rawEeg are reflected in the display.
+if FileExistsIn([baseName,'.eegstates.mat']) && ~exist('rawEeg','var')
     if ~exist('StateInfo','var')
         StateInfo = load([baseName,'.eegstates.mat']);
         StateInfo = StateInfo.StateInfo;
