@@ -333,14 +333,23 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
         setStatus('Loading motion file...', [0 0 0.7]); drawnow;
         try
             motion = double(readNPY(emgFile));
-            motion = motion(:)';  % ensure row vector
 
-            % TheStateEditor expects motion length = round(nSamples/eegFS) - 1
-            nSamples    = length(inputData.rawEeg{1});
-            targetLen   = round(nSamples / eegFS) - 1;
+            % If 2D matrix (e.g. N x channels or channels x N), collapse to 1D
+            if ~isvector(motion)
+                if size(motion, 1) <= size(motion, 2)
+                    motion = mean(motion, 1);  % average across rows → 1 x N
+                else
+                    motion = mean(motion, 2)'; % average across cols → 1 x N
+                end
+            end
+            motion = motion(:)';  % ensure 1 x N row vector
+
+            % TheStateEditor uses: nFFTChunks = max(1, round((nSamples - WinLength) / winstep))
+            % where WinLength = eegFS and winstep = eegFS  (see mtchglongIn call in TheStateEditor)
+            nSamples  = length(inputData.rawEeg{1});
+            targetLen = max(1, round((nSamples - eegFS) / eegFS));
 
             if length(motion) ~= targetLen
-                % Resample motion to the required number of bins
                 origX   = linspace(0, 1, length(motion));
                 targetX = linspace(0, 1, targetLen);
                 motion  = interp1(origX, motion, targetX, 'linear');
