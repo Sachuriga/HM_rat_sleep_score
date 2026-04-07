@@ -250,11 +250,28 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
             end
         end
 
+        %% Preprocess each channel: artifact clip + 50 Hz notch
+        setStatus('Preprocessing LFP (artifact removal + notch filter)...', [0 0 0.7]); drawnow;
+        wo = 50 / (eegFS/2);
+        bw = wo / 35;
+        [b_notch, a_notch] = iirnotch(wo, bw);
+
         inputData.Chs    = chsToUse;
         inputData.eegFS  = eegFS;
         inputData.rawEeg = {};
         for i = 1:3
-            inputData.rawEeg{i} = single(eegData(chsToUse(i), :));
+            sig = double(eegData(chsToUse(i), :));
+
+            % Clip large artifacts at ±5 sigma (MAD-based, robust)
+            mad_val   = median(abs(sig - median(sig)));
+            sigma_est = mad_val / 0.6745;
+            thresh    = 5 * sigma_est;
+            sig       = max(min(sig, thresh), -thresh);
+
+            % 50 Hz notch filter (zero-phase)
+            sig = filtfilt(b_notch, a_notch, sig);
+
+            inputData.rawEeg{i} = single(sig);
         end
         eegData = [];  % free memory
 

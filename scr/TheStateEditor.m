@@ -370,16 +370,18 @@ else
 
             disp(['Whitening and computing spectrogram for channel ', int2str(Chs(i)),'. This will all be over in a minute.']);
 
+            % Clip artifacts at ±5 sigma (MAD-based) + 50 Hz notch
+            sig = double(rawEeg{i});
+            mad_val = median(abs(sig - median(sig)));
+            sig = max(min(sig, 5*mad_val/0.6745), -5*mad_val/0.6745);
+            wo = 50/(eegFS/2); bw = wo/35;
+            [b_notch, a_notch] = iirnotch(wo, bw);
+            rawEeg{i} = single(filtfilt(b_notch, a_notch, sig));
+
             try
                 fspec{i} = LoadSpecArch(baseName, [], Chs(i), 1, 0, 3072, [0 200], 1, []);
             catch
                 fspec{i} =[];
-
-                % 50 Hz notch filter
-                wo = 50/(eegFS/2);  bw = wo/35;
-                [b_notch, a_notch] = iirnotch(wo, bw);
-                rawEeg{i} = single(filtfilt(b_notch, a_notch, double(rawEeg{i})));
-
                 weeg{i} =  WhitenSignalIn(rawEeg{i},eegFS*2000,1);
                 [fspec{i}.spec, fspec{i}.fo, fspec{i}.to] = mtchglongIn(weeg{i}, 3072, eegFS, eegFS, 0, [], [], [], [0 200]);
                 fspec{i}.spec = single(fspec{i}.spec);
@@ -395,16 +397,18 @@ else
 
             disp(['Whitening and computing spectrogram for channel ', int2str(Chs(i)),'. This will all be over in a minute.']);
 
+            % Clip artifacts at ±5 sigma (MAD-based) + 50 Hz notch
+            sig = double(rawEeg{i});
+            mad_val = median(abs(sig - median(sig)));
+            sig = max(min(sig, 5*mad_val/0.6745), -5*mad_val/0.6745);
+            wo = 50/(eegFS/2); bw = wo/35;
+            [b_notch, a_notch] = iirnotch(wo, bw);
+            rawEeg{i} = single(filtfilt(b_notch, a_notch, sig));
+
             try
                 fspec{i} = LoadSpecArch(baseName, [], Chs(i), 1, 0, 3072, [0 200], 1, []);
             catch
                 fspec{i} =[];
-
-                % 50 Hz notch filter
-                wo = 50/(eegFS/2);  bw = wo/35;
-                [b_notch, a_notch] = iirnotch(wo, bw);
-                rawEeg{i} = single(filtfilt(b_notch, a_notch, double(rawEeg{i})));
-
                 weeg{i} =  WhitenSignalIn(rawEeg{i}, eegFS*2000,1);
                 [fspec{i}.spec, fspec{i}.fo, fspec{i}.to] = mtchglongIn(weeg{i}, 3072, eegFS, eegFS, 0, [], [], [], [0 200]);
                 fspec{i}.spec = single(fspec{i}.spec);
