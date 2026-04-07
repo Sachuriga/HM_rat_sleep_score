@@ -329,12 +329,25 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
             end
         end
 
-        %% Load Motion
+        %% Load Motion and resample to match spectrogram bins
         setStatus('Loading motion file...', [0 0 0.7]); drawnow;
         try
-            motion = readNPY(emgFile);
+            motion = double(readNPY(emgFile));
+            motion = motion(:)';  % ensure row vector
+
+            % TheStateEditor expects motion length = round(nSamples/eegFS) - 1
+            nSamples    = length(inputData.rawEeg{1});
+            targetLen   = round(nSamples / eegFS) - 1;
+
+            if length(motion) ~= targetLen
+                % Resample motion to the required number of bins
+                origX   = linspace(0, 1, length(motion));
+                targetX = linspace(0, 1, targetLen);
+                motion  = interp1(origX, motion, targetX, 'linear');
+            end
+
             inputData.MotionType = 'File';
-            inputData.motion     = double(motion(:)');
+            inputData.motion     = motion;
         catch ME
             setStatus(['Error loading motion: ' ME.message], [0.8 0 0]); return;
         end
