@@ -333,16 +333,8 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
         setStatus('Loading motion file...', [0 0 0.7]); drawnow;
         try
             motion = double(readNPY(emgFile));
-
-            % If 2D matrix (e.g. N x channels or channels x N), collapse to 1D
-            if ~isvector(motion)
-                if size(motion, 1) <= size(motion, 2)
-                    motion = mean(motion, 1);  % average across rows → 1 x N
-                else
-                    motion = mean(motion, 2)'; % average across cols → 1 x N
-                end
-            end
-            motion = motion(:)';  % ensure 1 x N row vector
+            motion = motion';      % transpose (matches original script behaviour)
+            motion = motion(:)';   % flatten to 1 x N row vector
 
             % TheStateEditor uses: nFFTChunks = max(1, round((nSamples - WinLength) / winstep))
             % where WinLength = eegFS and winstep = eegFS  (see mtchglongIn call in TheStateEditor)
