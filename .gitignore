@@ -27,6 +27,9 @@ dist/
 build/
 .pytest_cache/
 
+# Data output (large files, not synced)
+LFP_Output/
+
 # Temporary files
 *.tmp
 *.temp
