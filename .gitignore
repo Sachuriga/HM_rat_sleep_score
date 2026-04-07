@@ -4,3 +4,31 @@ appengine-generated/
 # macOS metadata files
 .DS_Store
 **/.DS_Store
+
+# Log files
+*.log
+*.log.*
+logs/
+
+# MATLAB
+*.asv
+*.m~
+*.mex*
+slprj/
+matlab_crash_dump.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.bak
