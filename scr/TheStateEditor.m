@@ -183,7 +183,7 @@ if ~exist('spikeInfo', 'var')
     spikeInfo = 0;
 end
 
-FO.yrange = 2;
+FO.yrange = 0.0002;
 FO.downsample = 4; %displays only every fourth eeg point to save memory
 FO.baseName = baseName;
 FO.eegShow = 2; %show 2 seconds of eeg
@@ -936,17 +936,22 @@ FO.infoDisp = annotation('textbox', 'Position', [0.855, 0.31, 0.135, 0.135], 'Ed
 a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.275, 0.135, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Y Range 1');
 FO.ylimbox{1} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.255, 0.06, 0.022]);
-set(FO.ylimbox{1}, 'Callback', {@changeYlim}, 'String', int2str(round(diff(FO.yrange))));
+set(FO.ylimbox{1}, 'Callback', {@changeYlim}, 'String', num2str(FO.yrange));
 
 a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.227, 0.135, 0.028], 'EdgeColor', 'none');
 set(a, 'String', 'Y Range 2');
 FO.ylimbox{2} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.207, 0.06, 0.022]);
-set(FO.ylimbox{2}, 'Callback', {@changeYlim}, 'String', int2str(round(diff(FO.yrange))));
+set(FO.ylimbox{2}, 'Callback', {@changeYlim}, 'String', num2str(FO.yrange));
+
+a = annotation('textbox', 'Units', 'normalized', 'Position', [0.855, 0.179, 0.135, 0.028], 'EdgeColor', 'none');
+set(a, 'String', 'Y Range 3');
+FO.ylimbox{3} = uicontrol('Style', 'edit', 'Units', 'normalized', 'Position', [0.88, 0.159, 0.06, 0.022]);
+set(FO.ylimbox{3}, 'Callback', {@changeYlim}, 'String', num2str(FO.yrange));
 
 % Undo / Redo
-FO.undoButton = uicontrol('style', 'pushbutton', 'String', 'Undo State', 'Units', 'normalized', 'Position',  [0.87, 0.12, 0.1, 0.04]);
+FO.undoButton = uicontrol('style', 'pushbutton', 'String', 'Undo State', 'Units', 'normalized', 'Position',  [0.87, 0.11, 0.1, 0.04]);
 set(FO.undoButton, 'Callback', {@undoChange});
-FO.redoButton = uicontrol('style', 'pushbutton', 'String', 'Redo State', 'Units', 'normalized', 'Position',  [0.87, 0.07, 0.1, 0.04]);
+FO.redoButton = uicontrol('style', 'pushbutton', 'String', 'Redo State', 'Units', 'normalized', 'Position',  [0.87, 0.06, 0.1, 0.04]);
 set(FO.redoButton, 'Callback', {@redoChange});
 
 info = {};
@@ -972,7 +977,10 @@ end
 FO.eegYLim = [min(a(:, 1)), max(a(:, 2))];
 guidata(gcf, FO);
 
-
+% Apply default y-range to all EEG axes
+for i = 1:FO.nCh
+    set(FO.eax{i}, 'YLim', [-FO.yrange, FO.yrange]);
+end
 
 updateEEG;
 UpdateText;
