@@ -311,6 +311,15 @@ uicontrol('Parent', fig, 'Style', 'pushbutton', ...
         %% Launch TheStateEditor from output folder
         prevDir = pwd;
         cd(outFolder);
+
+        % Always start fresh — delete any existing .eegstates.mat so
+        % TheStateEditor recomputes from the current inputs.
+        oldFile = fullfile(outFolder, [baseName, '.eegstates.mat']);
+        if isfile(oldFile)
+            delete(oldFile);
+            setStatus('Removed existing .eegstates.mat — recomputing...', [0 0 0.7]); drawnow;
+        end
+
         setStatus('Launching TheStateEditor...', [0 0.45 0]); drawnow;
         try
             TheStateEditor(baseName, inputData);
