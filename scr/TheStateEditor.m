@@ -1332,8 +1332,10 @@ set(FO.mMidline, 'X', [newL, newL]);
 
 h = get(gcf, 'Children');
 try
-    h = [FO.lineParent; h(h ~= FO.lineParent)];
-    set(gcf, 'Children', h);
+    if any(h == FO.lineParent)
+        h = [FO.lineParent; h(h ~= FO.lineParent)];
+        set(gcf, 'Children', h);
+    end
 catch
 end
 
