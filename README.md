@@ -1,4 +1,4 @@
-# Rat Sleep Scoring Toolkit
+# Rat Sleep Scoring Toolkit v1
 
 MATLAB GUI for manual sleep state scoring of rodent LFP recordings using an interactive state editor.
 
