@@ -27,32 +27,43 @@ class SetupGUI:
 
         self.root = tk.Tk()
         self.root.title("Sleep Score Setup")
-        self.root.geometry("560x460")
-        self.root.resizable(False, False)
+        self.root.geometry("620x470")
+        self.root.minsize(560, 470)
+        self.root.resizable(True, False)
+        self._bring_to_front()
         self._build()
+
+    def _bring_to_front(self):
+        """Force the window (and its dialogs) to the foreground on macOS."""
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after_idle(self.root.attributes, "-topmost", False)
+        self.root.focus_force()
 
     # ------------------------------------------------------------------ layout
     def _build(self):
-        pad = {"padx": 12, "pady": 4}
+        # Column 0 (entries) stretches; column 1 (Browse buttons) stays fixed.
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_columnconfigure(1, weight=0)
 
         def header(text, row):
             tk.Label(self.root, text=text, font=("Helvetica", 11, "bold"),
-                     anchor="w").grid(row=row, column=0, columnspan=3,
-                                      sticky="w", **pad)
+                     anchor="w").grid(row=row, column=0, columnspan=2,
+                                      sticky="w", padx=12, pady=(8, 2))
 
         # LFP folder
         header("LFP Output Folder", 0)
         self.lfp_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.lfp_var, width=58, state="readonly").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=12)
+        tk.Entry(self.root, textvariable=self.lfp_var, state="readonly").grid(
+            row=1, column=0, sticky="we", padx=(12, 4))
         tk.Button(self.root, text="Browse...", command=self._sel_lfp).grid(
-            row=1, column=2, padx=6)
+            row=1, column=1, padx=(0, 12), sticky="e")
 
         # Channels
         header("Channel Numbers (1-N)", 2)
         self.ch_vars = []
         chframe = tk.Frame(self.root)
-        chframe.grid(row=3, column=0, columnspan=3, sticky="w", padx=12)
+        chframe.grid(row=3, column=0, columnspan=2, sticky="w", padx=12)
         for k in range(3):
             tk.Label(chframe, text=f"Ch {k + 1}:").grid(row=0, column=2 * k, padx=(0, 2))
             v = tk.StringVar(value=str(k + 1))
@@ -62,24 +73,24 @@ class SetupGUI:
         # Motion / EMG
         header("Motion / EMG File", 4)
         self.emg_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.emg_var, width=58, state="readonly").grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=12)
+        tk.Entry(self.root, textvariable=self.emg_var, state="readonly").grid(
+            row=5, column=0, sticky="we", padx=(12, 4))
         tk.Button(self.root, text="Browse...", command=self._sel_emg).grid(
-            row=5, column=2, padx=6)
+            row=5, column=1, padx=(0, 12), sticky="e")
         self.emg_auto = tk.Label(self.root, text="", fg="#007000", anchor="w")
-        self.emg_auto.grid(row=6, column=0, columnspan=3, sticky="w", padx=12)
+        self.emg_auto.grid(row=6, column=0, columnspan=2, sticky="w", padx=12)
 
         # Output folder
         header("Output / Save Folder", 7)
         self.out_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.out_var, width=58, state="readonly").grid(
-            row=8, column=0, columnspan=2, sticky="w", padx=12)
+        tk.Entry(self.root, textvariable=self.out_var, state="readonly").grid(
+            row=8, column=0, sticky="we", padx=(12, 4))
         tk.Button(self.root, text="Browse...", command=self._sel_out).grid(
-            row=8, column=2, padx=6)
+            row=8, column=1, padx=(0, 12), sticky="e")
 
         # Parameters
         params = tk.Frame(self.root)
-        params.grid(row=9, column=0, columnspan=3, sticky="w", padx=12, pady=6)
+        params.grid(row=9, column=0, columnspan=2, sticky="w", padx=12, pady=6)
         tk.Label(params, text="Sampling Rate (Hz):").grid(row=0, column=0)
         self.fs_var = tk.StringVar(value="1000")
         tk.Entry(params, textvariable=self.fs_var, width=8).grid(row=0, column=1, padx=(2, 20))
@@ -89,12 +100,12 @@ class SetupGUI:
 
         # Status + launch
         self.status = tk.Label(self.root, text="Ready. Select an LFP folder to begin.",
-                               fg="#333333", anchor="w", wraplength=520, justify="left")
-        self.status.grid(row=10, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 4))
+                               fg="#333333", anchor="w", wraplength=560, justify="left")
+        self.status.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
 
         tk.Button(self.root, text="Launch State Editor", font=("Helvetica", 12, "bold"),
                   bg="#2e8b2e", fg="white", command=self._launch).grid(
-            row=11, column=0, columnspan=3, pady=10, ipadx=20, ipady=8)
+            row=11, column=0, columnspan=2, pady=10, ipadx=20, ipady=8)
 
     # ------------------------------------------------------------------ helpers
     def _set_status(self, msg, color="#333333"):
@@ -102,7 +113,8 @@ class SetupGUI:
         self.root.update()
 
     def _sel_lfp(self):
-        folder = filedialog.askdirectory(title="Select LFP Output Folder")
+        folder = filedialog.askdirectory(title="Select LFP Output Folder",
+                                         parent=self.root)
         if not folder:
             return
         self.lfp_folder = folder
@@ -130,7 +142,7 @@ class SetupGUI:
     def _sel_emg(self):
         start = self.lfp_folder or os.getcwd()
         f = filedialog.askopenfilename(title="Select Motion / EMG File",
-                                       initialdir=start,
+                                       initialdir=start, parent=self.root,
                                        filetypes=[("NumPy", "*.npy")])
         if not f:
             return
@@ -139,7 +151,8 @@ class SetupGUI:
         self.emg_auto.config(text="Motion file set manually.", fg="#000099")
 
     def _sel_out(self):
-        folder = filedialog.askdirectory(title="Select Output / Save Folder")
+        folder = filedialog.askdirectory(title="Select Output / Save Folder",
+                                         parent=self.root)
         if folder:
             self.out_folder = folder
             self.out_var.set(folder)
