@@ -24,7 +24,7 @@ if "MPLBACKEND" not in os.environ:
     except Exception:
         pass
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
+from matplotlib.ticker import MaxNLocator
 from scipy.io import loadmat, savemat
 from scipy.signal.windows import hann
 
@@ -49,14 +49,39 @@ DOWNSAMPLE = 4        # plot every Nth LFP sample
 PAN_FRAC = 0.15       # fraction of the window moved by arrow keys
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
 
+HELP_LINES = [
+    ("1-5", "arm a state, then click its two time bounds"),
+    ("0", "arm 'no state' (erase) the same way"),
+    ("c", "cancel the armed state"),
+    ("click", "(no state armed) centre the LFP view here"),
+    ("← →", "pan left / right"),
+    ("Home / End", "jump to start / end"),
+    ("scroll", "zoom in / out around the cursor"),
+    ("↑ ↓", "spectrogram contrast up / down"),
+    ("- / =", "narrow / widen the LFP window"),
+    ("r", "reset time axis to full extent"),
+    ("u", "undo last state change"),
+    ("", ""),
+    ("e", "toggle add-event mode; click to drop a mark"),
+    ("d", "toggle delete-event mode; click near a mark"),
+    ("[ / ]", "previous / next event number (1-10)"),
+    ("n / p", "jump to next / previous event"),
+    ("", ""),
+    ("s / l", "save / load states + events"),
+    ("h", "toggle this help"),
+]
+
+EVENT_COLOR = "magenta"
+
 
 class StateEditor:
     def __init__(self, base_name, specs, fos, to, motion, raw_eeg, eeg_fs,
-                 out_folder=".", states=None):
+                 out_folder=".", states=None, chs=None):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
         self.n_ch = len(specs)
+        self.chs = list(chs) if chs is not None else list(range(1, self.n_ch + 1))
         self.to = np.asarray(to, dtype=float)
         self.lims = (float(self.to[0]), float(self.to[-1]))
         self.n_bins = self.to.size
@@ -88,9 +113,19 @@ class StateEditor:
         self.current_state = None
         self.pending_bound = None
         self.pending_line = []
+        self.dirty = False          # unsaved changes?
+        self.help_visible = False
+
+        # --- event marking state --------------------------------------------
+        self.events = []            # list of [event_num, time_s]
+        self.event_num = 1          # currently active event number (1-10)
+        self.event_mode = None      # None | 'add' | 'delete'
+        self.event_artists = []     # drawn vertical lines + labels
 
         self._build_figure()
+        self._build_side_panel()
         self._connect()
+        self._install_close_handler()
 
     # ------------------------------------------------------------------ setup
     def _prepare_specs(self, specs, fos):
@@ -134,7 +169,7 @@ class StateEditor:
         self.fig.canvas.manager.set_window_title(f"States: {self.base_name}")
 
         n = self.n_ch
-        left, width = 0.06, 0.86
+        left, width = 0.05, 0.80
         # vertical layout: state bar / spectrograms / motion / LFP traces
         self.ax_state = self.fig.add_axes([left, 0.945, width, 0.045])
         spec_top, spec_h = 0.93, (0.93 - 0.34) / n
@@ -159,7 +194,7 @@ class StateEditor:
                 extent=[self.to[0], self.to[-1], self.fo[mask][0], self.fo[mask][-1]],
                 cmap=cmap)
             self.spec_imgs.append(img)
-            ax.set_ylabel(f"Ch (Hz)")
+            ax.set_ylabel(f"Ch {self.chs[i]}\nFreq (Hz)")
             ax.set_xlim(self.lims)
             if i != n - 1:
                 ax.set_xticklabels([])
@@ -180,14 +215,111 @@ class StateEditor:
             (ln,) = ax.plot([], [], color="y", lw=0.5)
             self.eeg_lines.append(ln)
             ax.set_facecolor("black")
-            ax.set_ylabel("LFP")
+            ax.set_ylabel(f"Ch {self.chs[i]}")
             yabs = np.percentile(np.abs(self.eeg[i]), 99.5) or 1.0
             ax.set_ylim(-yabs, yabs)
+            ax.yaxis.set_major_locator(MaxNLocator(3))
             if i != n - 1:
                 ax.set_xticklabels([])
         self.ax_eeg[-1].set_xlabel("Time (s)")
 
         self._update_eeg(mid)
+        self._set_title()
+
+    # --------------------------------------------------------------- side panel
+    def _build_side_panel(self):
+        """Right-margin legend + live info + (hidden) help overlay."""
+        ax = self.fig.add_axes([0.865, 0.34, 0.125, 0.59])
+        ax.axis("off")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.text(0.0, 0.99, "States", fontsize=11, fontweight="bold", va="top")
+        for i, s in enumerate([1, 2, 3, 4, 5, 0]):
+            y = 0.92 - i * 0.058
+            ax.add_patch(plt.Rectangle((0.0, y - 0.035), 0.16, 0.045,
+                                       facecolor=STATE_COLORS[s],
+                                       edgecolor="0.4", lw=0.6))
+            ax.text(0.21, y - 0.013, f"{s}  {STATE_NAMES[s]}", fontsize=9, va="center")
+        ax.text(0.0, 0.50, "Press 'h' for help", fontsize=8.5,
+                style="italic", color="0.35", va="top")
+        self.ax_side = ax
+
+        # live info text (armed state, position, coverage)
+        self.info_text = self.fig.text(0.865, 0.30, "", fontsize=9,
+                                       va="top", family="monospace")
+        self._update_info()
+
+        # full-figure help overlay, hidden until toggled
+        lines = ["Keyboard / mouse controls", ""]
+        lines += [f"{k:>10}   {d}" for k, d in HELP_LINES]
+        self.help_overlay = self.fig.text(
+            0.5, 0.5, "\n".join(lines), ha="center", va="center",
+            fontsize=12, family="monospace", visible=False, zorder=100,
+            bbox=dict(boxstyle="round,pad=1.0", facecolor="#ffffe0",
+                      edgecolor="0.3"))
+
+    def _coverage(self):
+        scored = int(np.count_nonzero(self.states))
+        return scored, self.n_bins
+
+    def _update_info(self):
+        centre = np.mean(self.ax_spec[0].get_xlim()) if hasattr(self, "ax_spec") \
+            else self.lims[0]
+        scored, total = self._coverage()
+        pct = 100.0 * scored / total if total else 0.0
+        if self.current_state is not None:
+            armed = f"state {self.current_state} ({STATE_NAMES[self.current_state]})"
+        elif self.event_mode:
+            armed = f"{self.event_mode} event {self.event_num}"
+        else:
+            armed = "none"
+        dur = self.lims[1] - self.lims[0]
+        n_ev = len(self.events)
+        n_ev_active = sum(1 for en, _ in self.events if en == self.event_num)
+        lines = [
+            f"armed : {armed}",
+            f"time  : {centre:7.1f}s",
+            f"length: {dur:7.1f}s ({dur/60:.1f}m)",
+            f"scored: {pct:5.1f}%",
+            f"events: {n_ev}  (#{self.event_num}: {n_ev_active})",
+            "",
+            "per-state bins:",
+        ]
+        for s in range(1, 6):
+            c = int(np.count_nonzero(self.states == s))
+            lines.append(f"  {s} {STATE_NAMES[s][:6]:6} {c:6d}")
+        self.info_text.set_text("\n".join(lines))
+
+    def _toggle_help(self):
+        self.help_visible = not self.help_visible
+        self.help_overlay.set_visible(self.help_visible)
+        self.fig.canvas.draw_idle()
+
+    def _install_close_handler(self):
+        """Warn about unsaved work when closing (TkAgg only; no-op elsewhere)."""
+        try:
+            win = self.fig.canvas.manager.window
+            win.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        except Exception:
+            pass
+
+    def _on_close_request(self):
+        if self.dirty:
+            try:
+                from tkinter import messagebox
+                resp = messagebox.askyesnocancel(
+                    "Unsaved changes",
+                    "Save state scoring before closing?")
+                if resp is None:           # cancel -> stay open
+                    return
+                if resp:                   # yes -> save then close
+                    self.save_states()
+            except Exception:
+                pass
+        plt.close(self.fig)
+
+    def _mark_dirty(self):
+        self.dirty = True
         self._set_title()
 
     def _draw_state_bar(self):
@@ -215,7 +347,15 @@ class StateEditor:
         extra = ""
         if self.current_state is not None:
             extra = f" - Add State {self.current_state} ({STATE_NAMES[self.current_state]})"
-        self.fig.canvas.manager.set_window_title(f"States: {self.base_name}{extra}")
+        elif self.event_mode == "add":
+            extra = f" - Add Event {self.event_num} (click to place)"
+        elif self.event_mode == "delete":
+            extra = f" - Delete Event {self.event_num} (click near a mark)"
+        star = "*" if getattr(self, "dirty", False) else ""
+        self.fig.canvas.manager.set_window_title(f"States: {self.base_name}{star}{extra}")
+        if hasattr(self, "info_text"):
+            self._update_info()
+            self.fig.canvas.draw_idle()
 
     def _xlim_get(self):
         return self.ax_spec[0].get_xlim()
@@ -229,6 +369,8 @@ class StateEditor:
         self.ax_motion.set_xlim(lo, hi)
         self.ax_state.set_xlim(lo, hi)
         self._update_eeg((lo + hi) / 2)
+        if hasattr(self, "info_text"):
+            self._update_info()
         self.fig.canvas.draw_idle()
 
     def _update_eeg(self, centre):
@@ -251,18 +393,45 @@ class StateEditor:
         k = event.key
         if k in "012345":
             self.current_state = int(k)
+            self.event_mode = None
             self.pending_bound = None
             self._clear_pending_line()
             self._set_title()
         elif k == "c":
             self.current_state = None
+            self.event_mode = None
             self.pending_bound = None
             self._clear_pending_line()
             self._set_title()
+        elif k == "e":
+            self.event_mode = None if self.event_mode == "add" else "add"
+            self.current_state = None
+            self.pending_bound = None
+            self._clear_pending_line()
+            self._set_title()
+        elif k == "d":
+            self.event_mode = None if self.event_mode == "delete" else "delete"
+            self.current_state = None
+            self.pending_bound = None
+            self._clear_pending_line()
+            self._set_title()
+        elif k in ("[", "]"):
+            step = 1 if k == "]" else -1
+            self.event_num = (self.event_num - 1 + step) % 10 + 1
+            self._refresh_events()
+            self._set_title()
+        elif k in ("n", "p"):
+            self._jump_event(forward=(k == "n"))
         elif k in ("right", "left"):
             lo, hi = self._xlim_get()
             step = PAN_FRAC * (hi - lo) * (1 if k == "right" else -1)
             self._set_xlim(lo + step, hi + step)
+        elif k == "home":
+            lo, hi = self._xlim_get()
+            self._set_xlim(self.lims[0], self.lims[0] + (hi - lo))
+        elif k == "end":
+            lo, hi = self._xlim_get()
+            self._set_xlim(self.lims[1] - (hi - lo), self.lims[1])
         elif k == "r":
             self._set_xlim(*self.lims)
         elif k in ("up", "down"):
@@ -280,7 +449,7 @@ class StateEditor:
         elif k == "l":
             self.load_states()
         elif k == "h":
-            self._show_help()
+            self._toggle_help()
 
     def _change_eeg_width(self, k):
         cur = self.eeg_show
@@ -308,6 +477,14 @@ class StateEditor:
         in_panel = event.inaxes in self.ax_spec or event.inaxes is self.ax_motion \
             or event.inaxes is self.ax_state
         if not in_panel:
+            return
+
+        # event marking takes precedence when armed
+        if self.event_mode == "add":
+            self._add_event(event.xdata)
+            return
+        if self.event_mode == "delete":
+            self._delete_event(event.xdata)
             return
 
         if self.current_state is None:
@@ -341,6 +518,7 @@ class StateEditor:
             return
         self.history.append((i0, i1, self.states[i0:i1 + 1].copy()))
         self.states[i0:i1 + 1] = state
+        self._mark_dirty()
         self._refresh_state_bar()
 
     def _undo(self):
@@ -348,10 +526,72 @@ class StateEditor:
             return
         i0, i1, prev = self.history.pop()
         self.states[i0:i1 + 1] = prev
+        self._mark_dirty()
         self._refresh_state_bar()
 
     def _refresh_state_bar(self):
         self._draw_state_bar()
+        if hasattr(self, "info_text"):
+            self._update_info()
+        self.fig.canvas.draw_idle()
+
+    # ------------------------------------------------------------------- events
+    def _add_event(self, t):
+        self.events.append([self.event_num, float(t)])
+        self._mark_dirty()
+        self._refresh_events()
+
+    def _delete_event(self, t):
+        """Delete the nearest event of the active number within 1% of the view."""
+        lo, hi = self._xlim_get()
+        tol = 0.01 * (hi - lo)
+        candidates = [(abs(tm - t), i) for i, (en, tm) in enumerate(self.events)
+                      if en == self.event_num]
+        if not candidates:
+            return
+        dist, idx = min(candidates)
+        if dist <= tol:
+            self.events.pop(idx)
+            self._mark_dirty()
+            self._refresh_events()
+
+    def _jump_event(self, forward=True):
+        """Centre the view on the next/previous event of the active number."""
+        times = sorted(tm for en, tm in self.events if en == self.event_num)
+        if not times:
+            return
+        centre = np.mean(self._xlim_get())
+        if forward:
+            nxt = [t for t in times if t > centre + 1e-6]
+            target = nxt[0] if nxt else times[-1]
+        else:
+            prv = [t for t in times if t < centre - 1e-6]
+            target = prv[-1] if prv else times[0]
+        lo, hi = self._xlim_get()
+        half = (hi - lo) / 2
+        self._set_xlim(target - half, target + half)
+
+    def _refresh_events(self):
+        """Redraw all event lines (active number bold, others faint)."""
+        for a in self.event_artists:
+            a.remove()
+        self.event_artists = []
+        # not the state bar: it is cleared/redrawn whenever a state changes
+        panels = self.ax_spec + [self.ax_motion]
+        top_ax = self.ax_spec[0]
+        for en, tm in self.events:
+            active = (en == self.event_num)
+            lw = 1.6 if active else 0.7
+            alpha = 1.0 if active else 0.35
+            for ax in panels:
+                self.event_artists.append(
+                    ax.axvline(tm, color=EVENT_COLOR, ls=":", lw=lw, alpha=alpha))
+            self.event_artists.append(
+                top_ax.text(tm, 0.98, str(en), transform=top_ax.get_xaxis_transform(),
+                            color=EVENT_COLOR, fontsize=8, ha="center", va="top",
+                            alpha=alpha, clip_on=True))
+        if hasattr(self, "info_text"):
+            self._update_info()
         self.fig.canvas.draw_idle()
 
     # ------------------------------------------------------------------ save/load
@@ -359,10 +599,14 @@ class StateEditor:
         if path is None:
             path = os.path.join(self.out_folder, f"{self.base_name}-states.mat")
         transitions = self._compute_transitions()
+        events = (np.array(self.events, dtype=float) if self.events
+                  else np.zeros((0, 2)))
         savemat(path, {"states": self.states.astype(float).reshape(1, -1),
-                       "events": np.zeros((0, 2)),
+                       "events": events,
                        "transitions": transitions})
-        print(f"Saved {path}")
+        print(f"Saved {path}  ({len(self.events)} events)")
+        self.dirty = False
+        self._set_title()
         return path
 
     def _compute_transitions(self):
@@ -390,16 +634,18 @@ class StateEditor:
             s = np.asarray(data["states"]).ravel().astype(int)
             if s.size == self.n_bins:
                 self.states = s
+                self.dirty = False
                 self._refresh_state_bar()
+                self._set_title()
                 print(f"Loaded states from {path}")
             else:
                 print(f"State length mismatch ({s.size} vs {self.n_bins}); ignored")
-
-    def _show_help(self):
-        print(__doc__)
-        print("Keys: 0-5 arm state then click two bounds | c cancel | "
-              "left/right pan | scroll zoom | up/down contrast | -/= LFP width | "
-              "r reset | u undo | s save | l load | h help")
+        if "events" in data:
+            ev = np.asarray(data["events"], dtype=float)
+            if ev.ndim == 2 and ev.shape[1] == 2:
+                self.events = [[int(round(en)), float(tm)] for en, tm in ev]
+                self._refresh_events()
+                print(f"Loaded {len(self.events)} events")
 
     def show(self):
         plt.show()

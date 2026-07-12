@@ -15,8 +15,11 @@ Python output matches the original as closely as practical.
 
 from __future__ import annotations
 
+import os
+import re
+
 import numpy as np
-from scipy.signal import iirnotch, filtfilt, lfilter
+from scipy.signal import iirnotch, filtfilt, lfilter, firwin
 from scipy.signal.windows import dpss
 
 
@@ -129,6 +132,113 @@ def compute_channel_spectrogram(raw: np.ndarray, fs: float):
     return spec, fo, to, cleaned.astype(np.float32)
 
 
+def detect_sampling_rate(timestamps_file: str, default: float = 1000.0) -> float | None:
+    """Infer the LFP sampling rate from a timestamps ``.npy`` file.
+
+    Returns ``fs = (n - 1) / (t[-1] - t[0])`` rounded to a sensible value, or
+    ``None`` if the file is missing/unusable.
+    """
+    try:
+        ts = np.load(timestamps_file, mmap_mode="r")
+        ts = np.asarray(ts).ravel()
+        if ts.size < 2:
+            return None
+        span = float(ts[-1]) - float(ts[0])
+        if span <= 0:
+            return None
+        fs = (ts.size - 1) / span
+        # snap to the nearest 1 Hz; common rates land exactly
+        return float(round(fs))
+    except Exception:
+        return None
+
+
+_CHANNEL_FILE_RE = re.compile(r"lfp_nt(\d+)_ch\d+\.npy$", re.IGNORECASE)
+
+
+def find_lfp_source(folder: str):
+    """Locate the LFP data in ``folder``, supporting both on-disk layouts.
+
+    Two layouts are recognised, in priority order:
+
+    1. ``lfp_data.npy`` - a single ``[n_samples, n_channels]`` matrix (the
+       layout the MATLAB ``Sleep_score_HM_neuron.m`` expects).
+    2. ``channels_npy/lfp_ntNN_ch01.npy`` - one file per tetrode/channel
+       (the layout the example ``LFP_Output/`` folder actually ships).
+
+    Returns a dict describing the source, or ``None`` if neither is found::
+
+        {'kind': 'matrix',   'path': ...,  'channels': [1..n], 'n_samples': N}
+        {'kind': 'channels', 'files': {ch: path}, 'channels': [...], 'n_samples': N}
+
+    ``channels`` is the sorted list of channel numbers available to select.
+    """
+    mat = os.path.join(folder, "lfp_data.npy")
+    if os.path.isfile(mat):
+        arr = np.load(mat, mmap_mode="r")
+        n_samples = arr.shape[0]
+        n_ch = arr.shape[1] if arr.ndim > 1 else 1
+        return {"kind": "matrix", "path": mat,
+                "channels": list(range(1, n_ch + 1)), "n_samples": n_samples}
+
+    ch_dir = os.path.join(folder, "channels_npy")
+    files: dict[int, str] = {}
+    if os.path.isdir(ch_dir):
+        for name in os.listdir(ch_dir):
+            m = _CHANNEL_FILE_RE.match(name)
+            if m:
+                files[int(m.group(1))] = os.path.join(ch_dir, name)
+    if files:
+        first = np.load(next(iter(files.values())), mmap_mode="r")
+        return {"kind": "channels", "files": files,
+                "channels": sorted(files), "n_samples": first.shape[0]}
+    return None
+
+
+def load_lfp_channel(source: dict, ch: int) -> np.ndarray:
+    """Load one channel (1-based) from a source returned by :func:`find_lfp_source`."""
+    if source["kind"] == "matrix":
+        arr = np.load(source["path"], mmap_mode="r")
+        col = arr[:, ch - 1] if arr.ndim > 1 else arr
+        return np.asarray(col, dtype=np.float64)
+    path = source["files"].get(ch)
+    if path is None:
+        raise ValueError(f"channel {ch} not found in channels_npy/")
+    return np.asarray(np.load(path, mmap_mode="r"), dtype=np.float64).ravel()
+
+
+def cache_path(out_folder: str, base_name: str) -> str:
+    return os.path.join(out_folder, f"{base_name}.eegstates.npz")
+
+
+def save_cache(path, chs, eeg_fs, specs, fos, to, raw_eeg, motion):
+    """Persist computed spectrograms so re-opening a session is instant."""
+    np.savez_compressed(
+        path,
+        chs=np.asarray(chs),
+        eeg_fs=np.asarray([eeg_fs]),
+        specs=np.stack(specs),                 # (n_ch, n_freq, n_time)
+        fo=np.asarray(fos[0]),
+        to=np.asarray(to),
+        raw_eeg=np.stack([np.asarray(e) for e in raw_eeg]),
+        motion=np.asarray(motion),
+    )
+
+
+def load_cache(path, chs, eeg_fs):
+    """Return cached data if it matches the requested channels + rate, else None."""
+    try:
+        d = np.load(path, allow_pickle=False)
+    except Exception:
+        return None
+    if list(d["chs"]) != list(chs) or float(d["eeg_fs"][0]) != float(eeg_fs):
+        return None
+    specs = [d["specs"][i] for i in range(d["specs"].shape[0])]
+    fos = [d["fo"]] * len(specs)
+    raw = [d["raw_eeg"][i] for i in range(d["raw_eeg"].shape[0])]
+    return specs, fos, d["to"], raw, d["motion"]
+
+
 def downsample_motion(motion: np.ndarray, n_samples: int, fs: float) -> np.ndarray:
     """Reduce a motion/EMG signal to one value per spectrogram bin.
 
@@ -150,3 +260,80 @@ def downsample_motion(motion: np.ndarray, n_samples: int, fs: float) -> np.ndarr
     orig_x = np.linspace(0.0, 1.0, motion.size)
     target_x = np.linspace(0.0, 1.0, target_len)
     return np.interp(target_x, orig_x, motion)
+
+
+# --------------------------------------------------------------------------- #
+#  Motion processing (ports of TheStateEditor's motion branches)
+# --------------------------------------------------------------------------- #
+def _to_channels_by_time(arr) -> np.ndarray:
+    """Return the signal as ``[n_channels, n_samples]`` (channels = smaller dim)."""
+    if arr.ndim == 1:
+        return arr[None, :]
+    return arr.T if arr.shape[0] > arr.shape[1] else arr
+
+
+def _zscore_rows(x: np.ndarray) -> np.ndarray:
+    """z-score each row (channel) across time, matching ``zscore(x')'``."""
+    mu = x.mean(axis=1, keepdims=True)
+    sd = x.std(axis=1, keepdims=True)
+    sd[sd == 0] = 1.0
+    return (x - mu) / sd
+
+
+def _fir_bandpass(sig: np.ndarray, low: float, high: float, fs: float,
+                  numtaps: int = 501) -> np.ndarray:
+    """Zero-phase FIR band-pass, matching ``filter2(fir1(500,[lo hi]), sig)``.
+
+    ``fir1`` uses a Hamming window (scipy's ``firwin`` default) and produces
+    symmetric (linear-phase) taps, so ``filter2`` correlation == convolution.
+    """
+    nyq = fs / 2.0
+    high = min(high, 0.99 * nyq)      # guard: cutoff must stay below Nyquist
+    low = max(low, 1e-6)
+    taps = firwin(numtaps, [low, high], fs=fs, pass_zero=False)
+    return np.convolve(sig, taps, mode="same")
+
+
+def process_motion(motion_raw, n_samples: int, fs: float,
+                   mode: str = "accelerometer") -> np.ndarray:
+    """Turn a raw motion signal into one value per spectrogram bin.
+
+    Ports the motion branches of ``TheStateEditor.m``:
+
+    * ``"accelerometer"`` (case 3, the default): ``|z-score|`` each channel,
+      sum across channels, 0.1-1 Hz FIR band-pass, average into 1 s bins.
+    * ``"meg"`` (case 4): z-score + sum, 100-600 Hz band-pass, square, then
+      0.1-1 Hz band-pass, 1 s bins.
+    * ``"file"`` (case 5): no processing - just downsample (see
+      :func:`downsample_motion`).
+
+    Multi-channel input may be ``[n_channels, n_samples]`` or
+    ``[n_samples, n_channels]``; it is aligned to the LFP length first so the
+    band-pass runs at the LFP sampling rate, exactly as in the MATLAB tool
+    (which expects the motion channels resampled to ``eegFS``).
+    """
+    mode = (mode or "accelerometer").lower()
+    if mode == "file":
+        return downsample_motion(motion_raw, n_samples, fs)
+
+    arr = _to_channels_by_time(np.asarray(motion_raw))     # [nCh, N] (maybe mmap)
+    n = arr.shape[1]
+    if n != n_samples:
+        # align to the LFP rate via nearest-sample indexing (memory-light: only
+        # reads n_samples points, so huge motion files stay cheap)
+        idx = np.linspace(0, n - 1, n_samples).astype(np.int64)
+        arr = np.asarray(arr[:, idx], dtype=np.float64)
+    else:
+        arr = np.asarray(arr, dtype=np.float64)
+
+    if mode == "meg":
+        m = _zscore_rows(arr).sum(axis=0)
+        m = _fir_bandpass(m, 100.0, 600.0, fs)
+        sd = m.std() or 1.0
+        m = ((m - m.mean()) / sd) ** 2
+        m = _fir_bandpass(m, 0.1, 1.0, fs)
+    else:                                                  # accelerometer (case 3)
+        m = np.abs(_zscore_rows(arr)).sum(axis=0)
+        m = _fir_bandpass(m, 0.1, 1.0, fs)
+
+    return downsample_motion(m, n_samples, fs)             # 1 s bin average

@@ -12,10 +12,21 @@ from tkinter import filedialog, ttk
 
 import numpy as np
 
-from processing import compute_channel_spectrogram, downsample_motion
+from processing import (compute_channel_spectrogram, process_motion,
+                        detect_sampling_rate, cache_path, save_cache, load_cache,
+                        find_lfp_source, load_lfp_channel)
 from state_editor import StateEditor
 
-EMG_CANDIDATES = ["emg_rms.npy", "emg_data.npy",
+# motion processing modes shown in the dropdown -> process_motion() mode string
+MOTION_MODES = {
+    "Accelerometer (case 3)": "accelerometer",
+    "MEG (case 4)": "meg",
+    "File / precomputed (case 5)": "file",
+}
+
+# auto-detected motion files, in priority order (raw accelerometer first, to
+# suit the default Accelerometer mode)
+EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
                   "theta_delta_ratio.npy", "awakeness.npy"]
 
 
@@ -24,6 +35,7 @@ class SetupGUI:
         self.lfp_folder = ""
         self.emg_file = ""
         self.out_folder = ""
+        self.lfp_source = None      # dict from find_lfp_source, set on folder select
 
         self.root = tk.Tk()
         self.root.title("Sleep Score Setup")
@@ -88,29 +100,68 @@ class SetupGUI:
         tk.Button(self.root, text="Browse...", command=self._sel_out).grid(
             row=8, column=1, padx=(0, 12), sticky="e")
 
+        # Recording info (channels / duration, filled in after folder select)
+        self.info_label = tk.Label(self.root, text="", fg="#444444", anchor="w")
+        self.info_label.grid(row=9, column=0, columnspan=2, sticky="w", padx=12)
+
         # Parameters
         params = tk.Frame(self.root)
-        params.grid(row=9, column=0, columnspan=2, sticky="w", padx=12, pady=6)
+        params.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=6)
         tk.Label(params, text="Sampling Rate (Hz):").grid(row=0, column=0)
         self.fs_var = tk.StringVar(value="1000")
         tk.Entry(params, textvariable=self.fs_var, width=8).grid(row=0, column=1, padx=(2, 20))
         tk.Label(params, text="Session Name:").grid(row=0, column=2)
         self.name_var = tk.StringVar(value="HM_neurons")
         tk.Entry(params, textvariable=self.name_var, width=14).grid(row=0, column=3, padx=2)
+        tk.Label(params, text="Motion type:").grid(row=1, column=0, pady=(6, 0), sticky="w")
+        self.motion_mode_var = tk.StringVar(value="Accelerometer (case 3)")
+        ttk.Combobox(params, textvariable=self.motion_mode_var, state="readonly",
+                     values=list(MOTION_MODES.keys()), width=26).grid(
+            row=1, column=1, columnspan=3, sticky="w", padx=(2, 0), pady=(6, 0))
+
+        self.recompute_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(params, text="Ignore cache (recompute)",
+                       variable=self.recompute_var).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # Status + launch
         self.status = tk.Label(self.root, text="Ready. Select an LFP folder to begin.",
                                fg="#333333", anchor="w", wraplength=560, justify="left")
-        self.status.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
+        self.status.grid(row=11, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
 
         tk.Button(self.root, text="Launch State Editor", font=("Helvetica", 12, "bold"),
                   bg="#2e8b2e", fg="white", command=self._launch).grid(
-            row=11, column=0, columnspan=2, pady=10, ipadx=20, ipady=8)
+            row=12, column=0, columnspan=2, pady=10, ipadx=20, ipady=8)
 
     # ------------------------------------------------------------------ helpers
     def _set_status(self, msg, color="#333333"):
         self.status.config(text=msg, fg=color)
         self.root.update()
+
+    def _show_recording_info(self, folder):
+        """Display channel count + duration and auto-fill the sampling rate."""
+        src = self.lfp_source
+        if src is None:
+            self.info_label.config(text="")
+            return
+        n_samples = src["n_samples"]
+        chans = src["channels"]
+
+        fs = detect_sampling_rate(os.path.join(folder, "lfp_timestamps.npy"))
+        rate_note = ""
+        if fs:
+            self.fs_var.set(str(int(fs)))
+            rate_note = f"  (sampling rate auto-set to {int(fs)} Hz)"
+        try:
+            fs_val = float(self.fs_var.get())
+        except ValueError:
+            fs_val = fs or 1000.0
+        dur = n_samples / fs_val if fs_val else 0
+        layout = "lfp_data.npy" if src["kind"] == "matrix" else "channels_npy/"
+        rng = f"{chans[0]}-{chans[-1]}" if chans else "none"
+        self.info_label.config(
+            text=f"{len(chans)} channels ({rng}) via {layout}, {n_samples:,} samples, "
+                 f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
     def _sel_lfp(self):
         folder = filedialog.askdirectory(title="Select LFP Output Folder",
@@ -119,10 +170,14 @@ class SetupGUI:
             return
         self.lfp_folder = folder
         self.lfp_var.set(folder)
-        if not os.path.isfile(os.path.join(folder, "lfp_data.npy")):
-            self._set_status("Warning: lfp_data.npy not found in this folder.", "#cc6600")
+        self.lfp_source = find_lfp_source(folder)
+        if self.lfp_source is None:
+            self._set_status("Warning: no lfp_data.npy or channels_npy/ found here.",
+                             "#cc6600")
+            self.info_label.config(text="")
         else:
             self._set_status("Folder loaded. Enter channels, then Launch.", "#000000")
+            self._show_recording_info(folder)
 
         self.emg_file = ""
         for cand in EMG_CANDIDATES:
@@ -191,39 +246,58 @@ class SetupGUI:
             raise
 
     def _run(self, chs, eeg_fs, base):
-        lfp_file = os.path.join(self.lfp_folder, "lfp_data.npy")
-        if not os.path.isfile(lfp_file):
-            return self._set_status(f"Error: lfp_data.npy not found in {self.lfp_folder}",
-                                    "#cc0000")
+        source = self.lfp_source or find_lfp_source(self.lfp_folder)
+        if source is None:
+            return self._set_status(
+                f"Error: no lfp_data.npy or channels_npy/ found in {self.lfp_folder}",
+                "#cc0000")
 
-        self._set_status("Loading lfp_data.npy ...", "#0000aa")
-        eeg = np.load(lfp_file, mmap_mode="r")          # [samples, channels]
-        n_ch = eeg.shape[1]
-        for c in chs:
-            if c > n_ch:
-                return self._set_status(
-                    f"Error: channel {c} does not exist (file has {n_ch}).", "#cc0000")
+        cpath = cache_path(self.out_folder, base)
+        cached = None
+        if not self.recompute_var.get() and os.path.isfile(cpath):
+            self._set_status("Loading cached spectrograms ...", "#0000aa")
+            cached = load_cache(cpath, chs, eeg_fs)
 
-        self._set_status("Preprocessing + computing spectrograms ...", "#0000aa")
-        specs, fos, raw_eeg = [], [], []
-        to = None
-        for c in chs:
-            sig = np.asarray(eeg[:, c - 1], dtype=np.float64)
-            spec, fo, to, cleaned = compute_channel_spectrogram(sig, eeg_fs)
-            specs.append(spec)
-            fos.append(fo)
-            raw_eeg.append(cleaned)
+        if cached is not None:
+            specs, fos, to, raw_eeg, motion = cached
+        else:
+            available = set(source["channels"])
+            for c in chs:
+                if c not in available:
+                    return self._set_status(
+                        f"Error: channel {c} not available "
+                        f"(have {source['channels'][0]}-{source['channels'][-1]}).",
+                        "#cc0000")
 
-        self._set_status("Loading motion file ...", "#0000aa")
-        motion_raw = np.load(self.emg_file)
-        motion = downsample_motion(motion_raw, raw_eeg[0].size, eeg_fs)
-        if motion.size != to.size:
-            motion = np.interp(np.linspace(0, 1, to.size),
-                               np.linspace(0, 1, motion.size), motion.ravel())
+            specs, fos, raw_eeg = [], [], []
+            to = None
+            for n, c in enumerate(chs, 1):
+                self._set_status(
+                    f"Preprocessing + spectrogram, channel {c} ({n}/{len(chs)}) ...",
+                    "#0000aa")
+                sig = load_lfp_channel(source, c)
+                spec, fo, to, cleaned = compute_channel_spectrogram(sig, eeg_fs)
+                specs.append(spec)
+                fos.append(fo)
+                raw_eeg.append(cleaned)
+
+            mode = MOTION_MODES.get(self.motion_mode_var.get(), "accelerometer")
+            self._set_status(f"Loading + processing motion ({mode}) ...", "#0000aa")
+            motion_raw = np.load(self.emg_file, mmap_mode="r")
+            motion = process_motion(motion_raw, raw_eeg[0].size, eeg_fs, mode=mode)
+            if motion.size != to.size:
+                motion = np.interp(np.linspace(0, 1, to.size),
+                                   np.linspace(0, 1, motion.size), motion.ravel())
+
+            self._set_status("Caching spectrograms for fast reload ...", "#0000aa")
+            try:
+                save_cache(cpath, chs, eeg_fs, specs, fos, to, raw_eeg, motion)
+            except Exception as exc:
+                print(f"Warning: could not write cache: {exc}")
 
         self._set_status("Launching state editor ...", "#007000")
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
-                             out_folder=self.out_folder)
+                             out_folder=self.out_folder, chs=chs)
         self.root.withdraw()
         editor.show()
         self.root.deiconify()
