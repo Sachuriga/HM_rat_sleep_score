@@ -76,7 +76,9 @@ EVENT_COLOR = "magenta"
 
 class StateEditor:
     def __init__(self, base_name, specs, fos, to, motion, raw_eeg, eeg_fs,
-                 out_folder=".", states=None, chs=None):
+                 out_folder=".", states=None, chs=None,
+                 auto_states=None, auto_states_ts=None,
+                 auto_label="Auto (Buzsáki)"):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
@@ -89,6 +91,10 @@ class StateEditor:
         self.states = (np.zeros(self.n_bins, dtype=int) if states is None
                        else np.asarray(states, dtype=int).copy())
         self.history = []          # for undo
+
+        # --- optional auto-scored (Buzsáki) labels, shown in an extra panel ----
+        self.auto_label = auto_label
+        self.auto_states = self._align_auto_states(auto_states, auto_states_ts)
 
         # --- display-ready spectrograms (bin freq, smooth time, log) --------
         self.spec_disp, self.fo = self._prepare_specs(specs, fos)
@@ -126,6 +132,24 @@ class StateEditor:
         self._build_side_panel()
         self._connect()
         self._install_close_handler()
+
+    def _align_auto_states(self, auto_states, auto_states_ts):
+        """Resample provided auto-labels onto this session's 1 s bins (nearest)."""
+        if auto_states is None:
+            return None
+        a = np.asarray(auto_states, dtype=int).ravel()
+        if a.size == self.n_bins and auto_states_ts is None:
+            return a.copy()
+        if auto_states_ts is not None:
+            ts = np.asarray(auto_states_ts, dtype=float).ravel()
+            idx = np.clip(np.searchsorted(ts, self.to), 0, ts.size - 1)
+            left = np.clip(idx - 1, 0, ts.size - 1)
+            choose_left = np.abs(ts[left] - self.to) < np.abs(ts[idx] - self.to)
+            idx = np.where(choose_left, left, idx)
+            return a[idx]
+        src = np.linspace(0, 1, a.size)
+        dst = np.linspace(0, 1, self.n_bins)
+        return a[np.clip(np.searchsorted(src, dst), 0, a.size - 1)]
 
     # ------------------------------------------------------------------ setup
     def _prepare_specs(self, specs, fos):
@@ -170,9 +194,17 @@ class StateEditor:
 
         n = self.n_ch
         left, width = 0.05, 0.80
-        # vertical layout: state bar / spectrograms / motion / LFP traces
-        self.ax_state = self.fig.add_axes([left, 0.945, width, 0.045])
-        spec_top, spec_h = 0.93, (0.93 - 0.34) / n
+        # vertical layout: (auto bar) / state bar / spectrograms / motion / LFP traces
+        has_auto = self.auto_states is not None
+        if has_auto:
+            self.ax_state = self.fig.add_axes([left, 0.958, width, 0.032])
+            self.ax_auto = self.fig.add_axes([left, 0.921, width, 0.032])
+            spec_top = 0.905
+        else:
+            self.ax_state = self.fig.add_axes([left, 0.945, width, 0.045])
+            self.ax_auto = None
+            spec_top = 0.93
+        spec_h = (spec_top - 0.34) / n
         self.ax_spec, self.spec_imgs = [], []
         for i in range(n):
             y = spec_top - (i + 1) * spec_h
@@ -183,6 +215,8 @@ class StateEditor:
                        for i in range(n)]
 
         self._draw_state_bar()
+        if has_auto:
+            self._draw_auto_bar()
 
         cmap = "jet"
         self.cursor_lines = []
@@ -336,6 +370,24 @@ class StateEditor:
         self.ax_state.set_ylabel("State")
         self.ax_state.set_xlim(getattr(self, "_xlim", self.lims))
 
+    def _draw_auto_bar(self):
+        """Colour bar of the provided auto-scored (Buzsáki) labels."""
+        if self.ax_auto is None or self.auto_states is None:
+            return
+        rgb = np.ones((5, self.n_bins, 3))
+        for s in range(1, 6):
+            idx = self.auto_states == s
+            if idx.any():
+                rgb[:, idx, :] = STATE_COLORS[s]
+        self.ax_auto.clear()
+        self.ax_auto.imshow(rgb, origin="lower", aspect="auto",
+                            extent=[self.to[0], self.to[-1], 0.5, 5.5])
+        self.ax_auto.set_yticks([1, 3, 5])
+        self.ax_auto.set_yticklabels(["W", "N", "R"], fontsize=7)
+        self.ax_auto.set_xticks([])
+        self.ax_auto.set_ylabel(self.auto_label, fontsize=8)
+        self.ax_auto.set_xlim(getattr(self, "_xlim", self.lims))
+
     # ------------------------------------------------------------------ events
     def _connect(self):
         c = self.fig.canvas
@@ -368,6 +420,8 @@ class StateEditor:
             ax.set_xlim(lo, hi)
         self.ax_motion.set_xlim(lo, hi)
         self.ax_state.set_xlim(lo, hi)
+        if self.ax_auto is not None:
+            self.ax_auto.set_xlim(lo, hi)
         self._update_eeg((lo + hi) / 2)
         if hasattr(self, "info_text"):
             self._update_info()

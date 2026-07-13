@@ -132,14 +132,49 @@ For display the spectrogram is frequency-binned (~0.5 Hz), smoothed across time
 with a 10-point Hann window, log-scaled, and channels 2–3 are normalised to the
 dynamic range of channel 1 — matching `TheStateEditor.m`.
 
+## Buzsáki automatic scoring (optional)
+
+`buzsaki_score.py` is a Python port of the Buzsáki `SleepScoreMaster` / `ClusterStates`
+pipeline (Watson et al. 2016). It labels each 1 s bin **WAKE / NREM / REM** from
+three metrics — all 0–1 normalised, each split at its bimodal-histogram dip:
+
+| Metric | How | Separates |
+|--------|-----|-----------|
+| broadband slow wave | −slope of the log-log power spectrum over 4–90 Hz | NREM (steep 1/f) |
+| theta ratio | peak oscillatory residual over 5–10 Hz | REM |
+| EMG | EMG-from-LFP (tracker step 8), or a provided motion signal | WAKE vs sleep |
+
+`NREM = SW>thr`; `REM = ~NREM & EMG<thr & theta>thr`; `WAKE` = the rest. Without an
+EMG signal the REM/WAKE split uses theta only (REM tends to be over-called — supply
+`emg_from_lfp*.npy` for a proper split).
+
+Generate labels for a folder:
+
+```bash
+python buzsaki_score.py --lfp_folder /path/to/LFP_Output   # writes buzsaki_states.npz
+```
+
+### Seeing the labels in the editor
+
+The state editor shows an **extra colour bar** (`W`/`N`/`R`) above the manual state bar
+whenever auto-labels are supplied — it pans and zooms in lock-step with everything else,
+so you can score by hand while comparing against the automatic labels. The setup GUI's
+**"Show Buzsáki auto-score"** checkbox loads `buzsaki_states.npz` from the LFP/output
+folder if present, or computes it on launch. Programmatically:
+
+```python
+StateEditor(..., auto_states=states, auto_states_ts=timestamps)
+```
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `sleepscore.py` | Entry point (opens the setup GUI) |
 | `setup_gui.py` | Tkinter setup launcher — port of `Sleep_score_HM_neuron.m` |
-| `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` |
+| `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` (+ auto-label panel) |
 | `processing.py` | Preprocessing + multitaper spectrogram |
+| `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
 | `test_pipeline.py` | Headless smoke test (`python test_pipeline.py`) |
 
 ## Differences from the MATLAB version

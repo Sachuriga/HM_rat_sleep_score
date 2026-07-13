@@ -124,6 +124,13 @@ class SetupGUI:
                        variable=self.recompute_var).grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
+        # Buzsáki auto-scoring: shown as an extra panel in the editor. Loads a
+        # saved buzsaki_states.npz if present, or computes one when ticked.
+        self.buzsaki_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(params, text="Show Buzsáki auto-score (compute if missing)",
+                       variable=self.buzsaki_var).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
         # Status + launch
         self.status = tk.Label(self.root, text="Ready. Select an LFP folder to begin.",
                                fg="#333333", anchor="w", wraplength=560, justify="left")
@@ -295,13 +302,39 @@ class SetupGUI:
             except Exception as exc:
                 print(f"Warning: could not write cache: {exc}")
 
+        auto_states, auto_ts = self._buzsaki_labels(chs)
+
         self._set_status("Launching state editor ...", "#007000")
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
-                             out_folder=self.out_folder, chs=chs)
+                             out_folder=self.out_folder, chs=chs,
+                             auto_states=auto_states, auto_states_ts=auto_ts)
         self.root.withdraw()
         editor.show()
         self.root.deiconify()
         self._set_status("State editor closed. Results saved to output folder.", "#006600")
+
+    def _buzsaki_labels(self, chs):
+        """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).
+
+        Loads a saved buzsaki_states.npz from the LFP or output folder; if none
+        exists and the checkbox is ticked, computes one from the LFP folder.
+        """
+        if not self.buzsaki_var.get():
+            return None, None
+        import buzsaki_score as bz
+        for folder in (self.lfp_folder, self.out_folder):
+            f = os.path.join(folder, bz.DEFAULT_OUT)
+            if os.path.isfile(f):
+                self._set_status(f"Loaded Buzsáki labels: {f}", "#006600")
+                return bz.load_states(f)
+        try:
+            self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
+            res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0])
+            bz.save(res, os.path.join(self.lfp_folder, bz.DEFAULT_OUT))
+            return res["states"], res["timestamps"]
+        except Exception as exc:
+            self._set_status(f"Buzsáki auto-score skipped: {exc}", "#cc6600")
+            return None, None
 
     def run(self):
         self.root.mainloop()
