@@ -77,31 +77,51 @@ def _norm01(x):
     return (x - lo) / (hi - lo + 1e-12)
 
 
-def compute_metrics(lfp, fs, emg=None, emg_ts=None):
-    """Compute (times, broadbandSlowWave, thratio, emg_aligned), all 0–1 per 1 s bin.
-
-    ``lfp`` is one good LFP channel (a clear cortical/hippocampal channel) at ``fs``.
-    ``emg`` + ``emg_ts`` is the EMG-from-LFP signal and its timestamps (s); if not
-    given, the EMG metric is None and REM/WAKE fall back to theta only.
-    """
+def _sw_metric(lfp, fs):
+    """broadbandSlowWave (0–1 per 1 s bin) = -slope of log-log power over 4–90 Hz.
+    Cleanest from a CORTEX channel (strong slow-wave activity in NREM). Returns
+    (times, sw, fs_bins)."""
     f, t, Sxx = _spectrogram(lfp, fs)
-    logf_all = np.log10(f + 1e-12)
+    logf = np.log10(f + 1e-12)
     logP = np.log10(Sxx + 1e-12)
-    dt = np.median(np.diff(t)) if t.size > 1 else DT_S
-    fs_bins = 1.0 / dt
+    fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
+    m = (f >= SW_FRANGE[0]) & (f <= SW_FRANGE[1])
+    slope, _ = _loglog_fit(logf[m], logP[m, :])
+    return t, _norm01(_smooth(-slope, fs_bins)), fs_bins
 
-    # slow wave: -slope over 4–90 Hz
-    sw_mask = (f >= SW_FRANGE[0]) & (f <= SW_FRANGE[1])
-    slope, _ = _loglog_fit(logf_all[sw_mask], logP[sw_mask, :])
-    sw = _norm01(_smooth(-slope, fs_bins))
 
-    # theta: oscillatory residual over 5–10 Hz (fit 1/f over 2–20 Hz)
-    th_mask = (f >= TH_FRANGE[0]) & (f <= TH_FRANGE[1])
-    _, resid = _loglog_fit(logf_all[th_mask], logP[th_mask, :])
-    fth = f[th_mask]
+def _theta_metric(lfp, fs):
+    """thratio (0–1 per 1 s bin) = peak oscillatory residual over 5–10 Hz.
+    Strongest from a STRATUM RADIATUM channel (theta peaks there in REM)."""
+    f, t, Sxx = _spectrogram(lfp, fs)
+    logf = np.log10(f + 1e-12)
+    logP = np.log10(Sxx + 1e-12)
+    fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
+    m = (f >= TH_FRANGE[0]) & (f <= TH_FRANGE[1])
+    _, resid = _loglog_fit(logf[m], logP[m, :])
+    fth = f[m]
     tband = (fth >= TH_BAND[0]) & (fth <= TH_BAND[1])
     thratio = np.clip(resid[tband, :], 0, None).max(axis=0)
-    thratio = _norm01(_smooth(thratio, fs_bins))
+    return t, _norm01(_smooth(thratio, fs_bins))
+
+
+def compute_metrics(lfp, fs, emg=None, emg_ts=None, theta_lfp=None):
+    """Compute (times, broadbandSlowWave, thratio, emg_aligned), all 0–1 per 1 s bin.
+
+    ``lfp`` provides the slow-wave metric — use a **cortex** channel. ``theta_lfp``
+    (optional) provides the theta metric — use a **stratum radiatum** channel where
+    theta peaks; if omitted, theta is taken from ``lfp`` too (single-channel mode).
+    ``emg`` + ``emg_ts`` is the EMG-from-LFP; if not given, REM/WAKE fall back to
+    theta only.
+    """
+    t, sw, _ = _sw_metric(lfp, fs)
+    if theta_lfp is None:
+        thratio = _theta_metric(lfp, fs)[1]
+    else:
+        t_th, thratio = _theta_metric(theta_lfp, fs)
+        # align theta bins onto the SW time base if the two differ in length
+        if thratio.size != t.size:
+            thratio = np.interp(t, t_th, thratio)
 
     emg_aligned = None
     if emg is not None:
@@ -208,13 +228,15 @@ def enforce_min_duration(states, min_secs=6, dt=1.0):
 #  Full pipeline
 # ---------------------------------------------------------------------------- #
 def score(lfp, fs, emg=None, emg_ts=None, min_secs=6,
-          swthresh=None, ththresh=None, emgthresh=None):
+          swthresh=None, ththresh=None, emgthresh=None, theta_lfp=None):
     """Full Buzsáki auto-scoring. Returns a dict with states, timestamps, metrics.
 
-    ``states`` is one HM code (1/3/5) per 1 s bin; ``timestamps`` are the bin
-    centres (s). ``metrics`` holds the 0–1 sw/theta/emg and the thresholds used.
+    ``lfp`` = slow-wave (cortex) channel; ``theta_lfp`` = optional theta
+    (stratum radiatum) channel — pass both for layer-specific scoring. ``states``
+    is one HM code (1/3/5) per 1 s bin; ``timestamps`` are the bin centres (s).
     """
-    t, sw, thratio, emg_a = compute_metrics(lfp, fs, emg=emg, emg_ts=emg_ts)
+    t, sw, thratio, emg_a = compute_metrics(lfp, fs, emg=emg, emg_ts=emg_ts,
+                                            theta_lfp=theta_lfp)
     states, thr = cluster_states(sw, thratio, emg_a, swthresh=swthresh,
                                  ththresh=ththresh, emgthresh=emgthresh)
     dt = np.median(np.diff(t)) if t.size > 1 else DT_S
@@ -269,12 +291,15 @@ def _load_emg(lfp_dir, fs):
     return None, None
 
 
-def score_from_lfp_output(lfp_dir, channel=None, **kw):
+def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
+                          sr_channel=None, **kw):
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
-    Loads one LFP channel (``--channel`` or the first available), the sampling
-    rate from ``lfp_timestamps.npy``, and the EMG-from-LFP if present. Supports
-    both the ``lfp_data.npy`` and ``channels_npy/`` layouts (via processing.py).
+    Layer-specific channels (recommended, per-rat): ``ctx_channel`` (cortex) drives
+    the slow-wave/NREM metric, ``sr_channel`` (stratum radiatum) drives the
+    theta/REM metric. If only ``channel`` (or none) is given, a single channel
+    drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
+    (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
     """
     from processing import (find_lfp_source, load_lfp_channel,
                             detect_sampling_rate, find_output)
@@ -284,13 +309,29 @@ def score_from_lfp_output(lfp_dir, channel=None, **kw):
     if src is None:
         raise FileNotFoundError(f"no lfp_data.npy or channels_npy/ in {lfp_dir}")
     fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy")) or 1500.0
-    if channel is None:
-        channel = src["channels"][0]
-    lfp = load_lfp_channel(src, channel)
+
+    # Auto-load per-rat cortex/sr tetrodes saved by the tracker (SLEEP_CHANNELS_<rat>)
+    # unless the caller passed them explicitly.
+    if ctx_channel is None and sr_channel is None:
+        scf = find_output(lfp_dir, "sleep_channels.npy")
+        if scf is not None:
+            sc = np.load(scf, allow_pickle=True).item()
+            ctx_channel = sc.get("cortex")
+            sr_channel = sc.get("sr")
+            print(f"  using SLEEP_CHANNELS: cortex={ctx_channel} sr={sr_channel} "
+                  f"pyr={sc.get('pyr')}")
+
+    sw_ch = ctx_channel if ctx_channel is not None else (
+        channel if channel is not None else src["channels"][0])
+    lfp = load_lfp_channel(src, sw_ch)
+    theta_lfp = load_lfp_channel(src, sr_channel) if sr_channel is not None else None
+    if sr_channel is not None:
+        print(f"  slow-wave from cortex ch {sw_ch}, theta from SR ch {sr_channel}")
+
     emg, emg_ts = _load_emg(lfp_dir, fs)
     if emg is None:
         print("  (no emg_from_lfp found — REM/WAKE split uses theta only)")
-    return score(lfp, fs, emg=emg, emg_ts=emg_ts, **kw), channel
+    return score(lfp, fs, emg=emg, emg_ts=emg_ts, theta_lfp=theta_lfp, **kw), sw_ch
 
 
 def main():
