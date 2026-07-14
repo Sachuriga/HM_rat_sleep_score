@@ -159,6 +159,12 @@ _CHANNEL_FILE_RE = re.compile(r"lfp_nt(\d+)_ch\d+\.npy$", re.IGNORECASE)
 # rat token ... Trodes datetime YYYYMMDD_HHMMSS -> "Rat6_20260707_091045_"
 _SESSION_RE = re.compile(r"(?P<rat>[A-Za-z]+\d+).*?(?P<dt>\d{8}_\d{6})")
 
+# A full session prefix ("Rat6_20260707_091045_") and nothing more. Used to tell
+# an unprefixed / properly-prefixed output file apart from a longer name that
+# merely *ends* with the same suffix (e.g. emg_from_lfp_timestamps.npy vs
+# lfp_timestamps.npy).
+_PREFIX_ONLY_RE = re.compile(r"^[A-Za-z]+\d+_\d{8}_\d{6}_$")
+
 
 def session_prefix(name) -> str:
     """Return ``'Rat6_20260707_091045_'`` from a recording name, or ``''``."""
@@ -169,12 +175,24 @@ def session_prefix(name) -> str:
 
 
 def find_output(folder, suffix):
-    """Find ``<folder>/<prefix?><suffix>`` (prefixed or not). Returns a path or None."""
+    """Find ``<folder>/<prefix?><suffix>`` (prefixed or not). Returns a path or None.
+
+    Only accepts the bare ``suffix`` or a full ``Rat<n>_<date>_<time>_`` session
+    prefix + suffix. This stops a ``*<suffix>`` glob from matching a longer name
+    that merely ends with the same text — e.g. ``lfp_timestamps.npy`` must not
+    resolve to ``..._emg_from_lfp_timestamps.npy`` (a 5 Hz EMG timebase), which
+    would otherwise mis-detect the LFP sampling rate.
+    """
     exact = os.path.join(folder, suffix)
     if os.path.isfile(exact):
         return exact
     import glob
-    matches = sorted(glob.glob(os.path.join(folder, f"*{suffix}")), key=os.path.getmtime)
+    matches = []
+    for p in glob.glob(os.path.join(folder, f"*{suffix}")):
+        prefix = os.path.basename(p)[:-len(suffix)]
+        if prefix == "" or _PREFIX_ONLY_RE.match(prefix):
+            matches.append(p)
+    matches.sort(key=os.path.getmtime)
     return matches[-1] if matches else None
 
 

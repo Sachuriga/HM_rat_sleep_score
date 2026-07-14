@@ -357,31 +357,52 @@ class StateEditor:
         self._set_title()
 
     def _draw_state_bar(self):
-        rgb = np.ones((5, self.n_bins, 3))
-        for s in range(1, 6):
-            idx = self.states == s
-            if idx.any():
-                rgb[:, idx, :] = STATE_COLORS[s]
         self.ax_state.clear()
-        self.ax_state.imshow(rgb, origin="lower", aspect="auto",
-                             extent=[self.to[0], self.to[-1], 0.5, 5.5])
+        self._plot_hypnogram(self.ax_state, self.states)
         self.ax_state.set_yticks([1, 2, 3, 4, 5])
         self.ax_state.set_xticks([])
         self.ax_state.set_ylabel("State")
         self.ax_state.set_xlim(getattr(self, "_xlim", self.lims))
 
+    def _plot_hypnogram(self, ax, states):
+        """Draw a stepped hypnogram (staircase) of ``states`` on ``ax``.
+
+        Mirrors TheStateEditor's original look: a step line running between the
+        state levels, with each horizontal run drawn in its state colour and
+        unscored (0) bins left as gaps.
+        """
+        y = np.asarray(states, dtype=float).copy()
+        y[y == 0] = np.nan                              # unscored -> gap
+        t = np.asarray(self.to, dtype=float)
+        # grey staircase outline (the vertical transitions between levels)
+        ax.step(t, y, where="post", color="0.55", lw=0.8, zorder=1)
+        # coloured horizontal segment per contiguous run
+        for s, e, v in self._state_runs(states):
+            if v == 0:
+                continue
+            x1 = t[e] if e < t.size else t[-1]
+            ax.hlines(v, t[s], x1, color=STATE_COLORS[v], lw=2.4, zorder=2)
+        ax.set_ylim(0.5, 5.5)
+
+    @staticmethod
+    def _state_runs(states):
+        """Yield (start, end_exclusive, value) for each contiguous run."""
+        states = np.asarray(states)
+        n = states.size
+        if n == 0:
+            return
+        start = 0
+        for i in range(1, n + 1):
+            if i == n or states[i] != states[start]:
+                yield start, i, int(states[start])
+                start = i
+
     def _draw_auto_bar(self):
-        """Colour bar of the provided auto-scored (Buzsáki) labels."""
+        """Stepped hypnogram of the provided auto-scored (Buzsáki) labels."""
         if self.ax_auto is None or self.auto_states is None:
             return
-        rgb = np.ones((5, self.n_bins, 3))
-        for s in range(1, 6):
-            idx = self.auto_states == s
-            if idx.any():
-                rgb[:, idx, :] = STATE_COLORS[s]
         self.ax_auto.clear()
-        self.ax_auto.imshow(rgb, origin="lower", aspect="auto",
-                            extent=[self.to[0], self.to[-1], 0.5, 5.5])
+        self._plot_hypnogram(self.ax_auto, self.auto_states)
         self.ax_auto.set_yticks([1, 3, 5])
         self.ax_auto.set_yticklabels(["W", "N", "R"], fontsize=7)
         self.ax_auto.set_xticks([])
