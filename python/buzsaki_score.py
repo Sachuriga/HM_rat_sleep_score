@@ -255,15 +255,15 @@ DEFAULT_OUT = "buzsaki_states.npz"
 
 def _load_emg(lfp_dir, fs):
     """Load the EMG-from-LFP signal from an LFP_Output folder, else (None, None)."""
-    lfp_dir = Path(lfp_dir)
-    f5 = lfp_dir / "emg_from_lfp_5hz.npy"
-    if f5.is_file():
+    from processing import find_output
+    f5 = find_output(lfp_dir, "emg_from_lfp_5hz.npy")   # prefixed or not
+    if f5 is not None:
         emg = np.load(f5).ravel()
-        ts_file = lfp_dir / "emg_from_lfp_timestamps.npy"
-        ts = np.load(ts_file).ravel() if ts_file.is_file() else None
+        ts_file = find_output(lfp_dir, "emg_from_lfp_timestamps.npy")
+        ts = np.load(ts_file).ravel() if ts_file is not None else None
         return emg, ts
-    fper = lfp_dir / "emg_from_lfp.npy"
-    if fper.is_file():
+    fper = find_output(lfp_dir, "emg_from_lfp.npy")
+    if fper is not None:
         emg = np.load(fper).ravel()
         return emg, np.arange(emg.size) / fs
     return None, None
@@ -276,13 +276,14 @@ def score_from_lfp_output(lfp_dir, channel=None, **kw):
     rate from ``lfp_timestamps.npy``, and the EMG-from-LFP if present. Supports
     both the ``lfp_data.npy`` and ``channels_npy/`` layouts (via processing.py).
     """
-    from processing import find_lfp_source, load_lfp_channel, detect_sampling_rate
+    from processing import (find_lfp_source, load_lfp_channel,
+                            detect_sampling_rate, find_output)
 
     lfp_dir = Path(lfp_dir)
     src = find_lfp_source(str(lfp_dir))
     if src is None:
         raise FileNotFoundError(f"no lfp_data.npy or channels_npy/ in {lfp_dir}")
-    fs = detect_sampling_rate(str(lfp_dir / "lfp_timestamps.npy")) or 1500.0
+    fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy")) or 1500.0
     if channel is None:
         channel = src["channels"][0]
     lfp = load_lfp_channel(src, channel)
@@ -308,7 +309,12 @@ def main():
 
     res, ch = score_from_lfp_output(args.lfp_folder, channel=args.channel,
                                     min_secs=args.min_secs)
-    out = args.out or str(Path(args.lfp_folder) / DEFAULT_OUT)
+    if args.out:
+        out = args.out
+    else:
+        from processing import output_prefix
+        pfx = output_prefix(args.lfp_folder)          # match the session's naming
+        out = str(Path(args.lfp_folder) / f"{pfx}{DEFAULT_OUT}")
     save(res, out)
 
     st = res["states"]

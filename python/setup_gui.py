@@ -14,7 +14,7 @@ import numpy as np
 
 from processing import (compute_channel_spectrogram, process_motion,
                         detect_sampling_rate, cache_path, save_cache, load_cache,
-                        find_lfp_source, load_lfp_channel)
+                        find_lfp_source, load_lfp_channel, find_output)
 from state_editor import StateEditor
 
 # motion processing modes shown in the dropdown -> process_motion() mode string
@@ -28,6 +28,10 @@ MOTION_MODES = {
 # suit the default Accelerometer mode)
 EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
                   "theta_delta_ratio.npy", "awakeness.npy"]
+
+# LFP for sleep scoring is ~250–2000 Hz. Anything above this is the raw
+# acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
+LFP_FS_MAX = 5000
 
 
 class SetupGUI:
@@ -108,7 +112,7 @@ class SetupGUI:
         params = tk.Frame(self.root)
         params.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=6)
         tk.Label(params, text="Sampling Rate (Hz):").grid(row=0, column=0)
-        self.fs_var = tk.StringVar(value="1000")
+        self.fs_var = tk.StringVar(value="1500")
         tk.Entry(params, textvariable=self.fs_var, width=8).grid(row=0, column=1, padx=(2, 20))
         tk.Label(params, text="Session Name:").grid(row=0, column=2)
         self.name_var = tk.StringVar(value="HM_neurons")
@@ -154,9 +158,18 @@ class SetupGUI:
         n_samples = src["n_samples"]
         chans = src["channels"]
 
-        fs = detect_sampling_rate(os.path.join(folder, "lfp_timestamps.npy"))
+        fs = detect_sampling_rate(find_output(folder, "lfp_timestamps.npy"))
         rate_note = ""
-        if fs:
+        # LFP for sleep scoring is ~250–2000 Hz. A detected rate this high means
+        # lfp_timestamps.npy holds the RAW acquisition rate (e.g. 30 kHz), not the
+        # LFP rate — auto-setting it would make each spectrogram bin ~fs samples
+        # (20× too wide) and score only ~1/20 of the recording. Keep the LFP
+        # default and warn instead of silently adopting the raw rate.
+        if fs and fs > LFP_FS_MAX:
+            rate_note = (f"  (⚠ lfp_timestamps.npy implies {int(fs)} Hz = the raw "
+                         f"rate, not the LFP rate — keeping {self.fs_var.get()} Hz. "
+                         f"Re-export the LFP or set the rate manually.)")
+        elif fs:
             self.fs_var.set(str(int(fs)))
             rate_note = f"  (sampling rate auto-set to {int(fs)} Hz)"
         try:
@@ -188,11 +201,12 @@ class SetupGUI:
 
         self.emg_file = ""
         for cand in EMG_CANDIDATES:
-            p = os.path.join(folder, cand)
-            if os.path.isfile(p):
-                self.emg_file = p
-                self.emg_var.set(p)
-                self.emg_auto.config(text=f"Auto-detected: {cand}", fg="#007000")
+            p = find_output(folder, cand)          # prefixed (rat_sessiondate_) or not
+            if p is not None:
+                self.emg_file = str(p)
+                self.emg_var.set(str(p))
+                self.emg_auto.config(text=f"Auto-detected: {os.path.basename(p)}",
+                                     fg="#007000")
                 break
         if not self.emg_file:
             self.emg_auto.config(text="No EMG file auto-detected - browse manually.",
@@ -246,6 +260,12 @@ class SetupGUI:
             return self._set_status("Error: all 3 channels must differ.", "#cc0000")
 
         base = self.name_var.get().strip() or "session"
+        # Prefix saved files (-states.mat, cache) with the session's rat_sessiondate_
+        # already on the LFP folder, so every generated file shares one naming.
+        from processing import output_prefix
+        pfx = output_prefix(self.lfp_folder)
+        if pfx and not base.startswith(pfx):
+            base = f"{pfx}{base}"
         try:
             self._run(chs, eeg_fs, base)
         except Exception as exc:  # surface any load/compute failure in the GUI
@@ -323,14 +343,16 @@ class SetupGUI:
             return None, None
         import buzsaki_score as bz
         for folder in (self.lfp_folder, self.out_folder):
-            f = os.path.join(folder, bz.DEFAULT_OUT)
-            if os.path.isfile(f):
+            f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
+            if f is not None:
                 self._set_status(f"Loaded Buzsáki labels: {f}", "#006600")
                 return bz.load_states(f)
         try:
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
             res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0])
-            bz.save(res, os.path.join(self.lfp_folder, bz.DEFAULT_OUT))
+            from processing import output_prefix
+            pfx = output_prefix(self.lfp_folder)
+            bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
             return res["states"], res["timestamps"]
         except Exception as exc:
             self._set_status(f"Buzsáki auto-score skipped: {exc}", "#cc6600")

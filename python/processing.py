@@ -153,7 +153,45 @@ def detect_sampling_rate(timestamps_file: str, default: float = 1000.0) -> float
         return None
 
 
+# Match a channel file whether or not it carries a rat_sessiondate_ prefix.
 _CHANNEL_FILE_RE = re.compile(r"lfp_nt(\d+)_ch\d+\.npy$", re.IGNORECASE)
+
+# rat token ... Trodes datetime YYYYMMDD_HHMMSS -> "Rat6_20260707_091045_"
+_SESSION_RE = re.compile(r"(?P<rat>[A-Za-z]+\d+).*?(?P<dt>\d{8}_\d{6})")
+
+
+def session_prefix(name) -> str:
+    """Return ``'Rat6_20260707_091045_'`` from a recording name, or ``''``."""
+    if not name:
+        return ""
+    m = _SESSION_RE.search(str(name))
+    return f"{m.group('rat')}_{m.group('dt')}_" if m else ""
+
+
+def find_output(folder, suffix):
+    """Find ``<folder>/<prefix?><suffix>`` (prefixed or not). Returns a path or None."""
+    exact = os.path.join(folder, suffix)
+    if os.path.isfile(exact):
+        return exact
+    import glob
+    matches = sorted(glob.glob(os.path.join(folder, f"*{suffix}")), key=os.path.getmtime)
+    return matches[-1] if matches else None
+
+
+def output_prefix(folder):
+    """Recover the ``rat_sessiondate_`` prefix already used by files in ``folder``.
+
+    Looks at known step-8 outputs and returns their common prefix (``''`` if the
+    files are unprefixed / absent), so new files (e.g. buzsaki_states.npz) can
+    match the session's existing naming.
+    """
+    for suffix in ("lfp_data.npy", "lfp_timestamps.npy", "channel_map.npy"):
+        p = find_output(folder, suffix)
+        if p is not None:
+            base = os.path.basename(p)
+            if base.endswith(suffix) and len(base) > len(suffix):
+                return base[:-len(suffix)]
+    return ""
 
 
 def find_lfp_source(folder: str):
@@ -173,8 +211,8 @@ def find_lfp_source(folder: str):
 
     ``channels`` is the sorted list of channel numbers available to select.
     """
-    mat = os.path.join(folder, "lfp_data.npy")
-    if os.path.isfile(mat):
+    mat = find_output(folder, "lfp_data.npy")   # prefixed or not
+    if mat is not None:
         arr = np.load(mat, mmap_mode="r")
         n_samples = arr.shape[0]
         n_ch = arr.shape[1] if arr.ndim > 1 else 1
@@ -185,7 +223,7 @@ def find_lfp_source(folder: str):
     files: dict[int, str] = {}
     if os.path.isdir(ch_dir):
         for name in os.listdir(ch_dir):
-            m = _CHANNEL_FILE_RE.match(name)
+            m = _CHANNEL_FILE_RE.search(name)   # .search tolerates a prefix
             if m:
                 files[int(m.group(1))] = os.path.join(ch_dir, name)
     if files:
