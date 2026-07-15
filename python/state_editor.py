@@ -25,6 +25,7 @@ if "MPLBACKEND" not in os.environ:
         pass
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from matplotlib.widgets import Slider
 from scipy.io import loadmat, savemat
 from scipy.signal.windows import hann
 
@@ -47,14 +48,18 @@ HANNING_W = 10        # temporal smoothing window for the spectrogram
 RESOLUTION = 0.5      # frequency binning resolution (Hz)
 DOWNSAMPLE = 4        # plot every Nth LFP sample
 PAN_FRAC = 0.15       # fraction of the window moved by arrow keys
+MIN_VIEW_WINDOW = 10.0  # smallest main-view window (s)
+MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span >= 10 s
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
 
 HELP_LINES = [
-    ("1-5", "arm a state, then click its two time bounds"),
-    ("0", "arm 'no state' (erase) the same way"),
+    ("1-5", "arm a state (then Space Space to score an epoch)"),
+    ("← →", "move the time cursor"),
+    ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
+    ("0", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
-    ("click", "(no state armed) centre the LFP view here"),
-    ("← →", "pan left / right"),
+    ("click", "move cursor here (or set a bound when armed)"),
+    ("Shift+← →", "pan the window left / right"),
     ("Home / End", "jump to start / end"),
     ("scroll", "zoom in / out around the cursor"),
     ("↑ ↓", "spectrogram contrast up / down"),
@@ -78,7 +83,7 @@ class StateEditor:
     def __init__(self, base_name, specs, fos, to, motion, raw_eeg, eeg_fs,
                  out_folder=".", states=None, chs=None,
                  auto_states=None, auto_states_ts=None,
-                 auto_label="Auto (Buzsáki)"):
+                 auto_label="Auto", overlays=None):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
@@ -110,10 +115,17 @@ class StateEditor:
         if m.size != self.n_bins:                      # be tolerant of length
             m = np.interp(np.linspace(0, 1, self.n_bins),
                           np.linspace(0, 1, m.size), m)
-        valid = ~np.isnan(m)
-        if valid.any():
-            m[valid] = (m[valid] - m[valid].mean()) / (m[valid].std() + 1e-12)
-        self.motion = m
+        self.motion = self._zscore(m)
+
+        # --- extra overlays on the motion axis (EMG, theta/delta, ...) -------
+        # Each is aligned to the 1 s bins and z-scored so several signals share
+        # one y-axis. ``overlays`` is a list of (label, values, timestamps|None).
+        self.overlays = []
+        for label, vals, ts in (overlays or []):
+            try:
+                self.overlays.append((label, self._zscore(self._align_signal(vals, ts))))
+            except Exception as exc:
+                print(f"Warning: could not add overlay {label}: {exc}")
 
         # --- scoring interaction state --------------------------------------
         self.current_state = None
@@ -121,6 +133,9 @@ class StateEditor:
         self.pending_line = []
         self.dirty = False          # unsaved changes?
         self.help_visible = False
+        # movable time cursor (← → step it, space confirms epoch bounds)
+        self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
+        self.cursor_time = float((self.lims[0] + self.lims[1]) / 2)
 
         # --- event marking state --------------------------------------------
         self.events = []            # list of [event_num, time_s]
@@ -150,6 +165,31 @@ class StateEditor:
         src = np.linspace(0, 1, a.size)
         dst = np.linspace(0, 1, self.n_bins)
         return a[np.clip(np.searchsorted(src, dst), 0, a.size - 1)]
+
+    @staticmethod
+    def _zscore(x):
+        """Z-score, ignoring NaNs (returns a copy)."""
+        x = np.asarray(x, dtype=float).copy()
+        valid = ~np.isnan(x)
+        if valid.any():
+            x[valid] = (x[valid] - x[valid].mean()) / (x[valid].std() + 1e-12)
+        return x
+
+    def _align_signal(self, values, ts=None):
+        """Resample a signal onto this session's 1 s bins (self.to).
+
+        With ``ts`` (same length as ``values``) it interpolates on real time;
+        otherwise it assumes the signal spans the whole recording uniformly.
+        """
+        v = np.asarray(values, dtype=float).ravel()
+        if ts is not None:
+            ts = np.asarray(ts, dtype=float).ravel()
+            n = min(v.size, ts.size)
+            return np.interp(self.to, ts[:n], v[:n])
+        if v.size == self.n_bins:
+            return v
+        return np.interp(np.linspace(0.0, 1.0, self.n_bins),
+                         np.linspace(0.0, 1.0, v.size), v)
 
     # ------------------------------------------------------------------ setup
     def _prepare_specs(self, specs, fos):
@@ -189,36 +229,55 @@ class StateEditor:
         return out, binned_fo
 
     def _build_figure(self):
-        self.fig = plt.figure(figsize=(15, 9))
-        self.fig.canvas.manager.set_window_title(f"States: {self.base_name}")
+        # free the editor's single-key shortcuts from matplotlib's default keymap
+        # (← → s p h r l etc. are otherwise hijacked for nav / save / log-scale)
+        for key, keep in [("keymap.back", ["backspace"]), ("keymap.forward", ["v"]),
+                          ("keymap.home", []), ("keymap.pan", []),
+                          ("keymap.save", ["ctrl+s"]), ("keymap.yscale", []),
+                          ("keymap.xscale", []), ("keymap.zoom", [])]:
+            plt.rcParams[key] = keep
+        plt.rcParams.update({
+            "font.family": "sans-serif", "font.size": 9,
+            "axes.titlesize": 10, "axes.labelsize": 9,
+            "axes.edgecolor": "#8a8f98", "axes.linewidth": 0.8,
+            "xtick.color": "#4a4f57", "ytick.color": "#4a4f57",
+            "xtick.labelsize": 8, "ytick.labelsize": 8,
+            "figure.facecolor": "#f4f5f7", "axes.facecolor": "#ffffff",
+        })
+        self.fig = plt.figure(figsize=(16, 9.6), dpi=120)
+        self.fig.patch.set_facecolor("#f4f5f7")
+        self.fig.canvas.manager.set_window_title(f"Sleep scoring — {self.base_name}")
 
         n = self.n_ch
-        left, width = 0.05, 0.80
+        left, width = 0.065, 0.80
         # vertical layout: (auto bar) / state bar / spectrograms / motion / LFP traces
         has_auto = self.auto_states is not None
         if has_auto:
-            self.ax_state = self.fig.add_axes([left, 0.958, width, 0.032])
-            self.ax_auto = self.fig.add_axes([left, 0.921, width, 0.032])
-            spec_top = 0.905
+            self.ax_state = self.fig.add_axes([left, 0.944, width, 0.046])
+            self.ax_auto = self.fig.add_axes([left, 0.888, width, 0.046])
+            spec_top = 0.872
         else:
-            self.ax_state = self.fig.add_axes([left, 0.945, width, 0.045])
+            self.ax_state = self.fig.add_axes([left, 0.940, width, 0.050])
             self.ax_auto = None
-            spec_top = 0.93
+            spec_top = 0.918
         spec_h = (spec_top - 0.34) / n
         self.ax_spec, self.spec_imgs = [], []
         for i in range(n):
             y = spec_top - (i + 1) * spec_h
             self.ax_spec.append(self.fig.add_axes([left, y, width, spec_h - 0.005]))
         self.ax_motion = self.fig.add_axes([left, 0.235, width, 0.07])
-        eeg_h = 0.05
-        self.ax_eeg = [self.fig.add_axes([left, 0.18 - i * (eeg_h + 0.005), width, eeg_h])
-                       for i in range(n)]
+        # compact LFP stack anchored just below motion, leaving room at the very
+        # bottom (< ~0.09) for the window/position sliders.
+        eeg_h = 0.04
+        eeg_top = 0.23 - eeg_h
+        self.ax_eeg = [self.fig.add_axes([left, eeg_top - i * (eeg_h + 0.006),
+                                          width, eeg_h]) for i in range(n)]
 
         self._draw_state_bar()
         if has_auto:
             self._draw_auto_bar()
 
-        cmap = "jet"
+        cmap = "turbo"      # modern perceptually-uniform rainbow (jet-like)
         self.cursor_lines = []
         mid = (self.lims[0] + self.lims[1]) / 2
         for i, ax in enumerate(self.ax_spec):
@@ -234,31 +293,120 @@ class StateEditor:
                 ax.set_xticklabels([])
             self.cursor_lines.append(ax.axvline(mid, color="w", ls="--", lw=0.8))
 
-        self.ax_motion.plot(self.to, self.motion, "-k", lw=0.6)
-        valid = ~np.isnan(self.motion)
-        if valid.any():
-            self.ax_motion.set_ylim(np.percentile(self.motion[valid], 1),
-                                    np.percentile(self.motion[valid], 99))
-        self.ax_motion.set_ylabel("Motion (z)")
+        traces = [("Motion", self.motion, "#000000")] + [
+            (label, a, c) for (label, a), c in zip(
+                self.overlays, ["#c0392b", "#2980b9", "#16a085", "#8e44ad"])]
+        for label, a, c in traces:
+            self.ax_motion.plot(self.to, a, "-", color=c, lw=0.6, label=label)
+        allv = np.concatenate([a[np.isfinite(a)] for _, a, _ in traces
+                               if np.isfinite(a).any()]) if traces else np.array([0.0])
+        if allv.size:
+            self.ax_motion.set_ylim(np.percentile(allv, 1), np.percentile(allv, 99))
+        self.ax_motion.set_ylabel("Motion · EMG\n" + r"$\theta/\delta$  (z)",
+                                  fontsize=8)
+        if self.overlays:
+            self.ax_motion.legend(loc="upper right", fontsize=6, ncol=len(traces),
+                                  framealpha=0.4, handlelength=1.0, columnspacing=1.0)
         self.ax_motion.set_xlim(self.lims)
         self.ax_motion.set_xticklabels([])
         self.cursor_lines.append(self.ax_motion.axvline(mid, color="k", ls="--", lw=0.8))
 
-        self.eeg_lines = []
+        self.eeg_lines, self.eeg_cursor, self.eeg_yabs = [], [], []
+        self.eeg_scale = 1.0                       # raw-trace amplitude gain
         for i, ax in enumerate(self.ax_eeg):
             (ln,) = ax.plot([], [], color="y", lw=0.5)
             self.eeg_lines.append(ln)
             ax.set_facecolor("black")
-            ax.set_ylabel(f"Ch {self.chs[i]}")
+            ax.set_ylabel(f"Ch {self.chs[i]}", fontsize=8.5, rotation=0,
+                          ha="right", va="center", labelpad=6)
             yabs = np.percentile(np.abs(self.eeg[i]), 99.5) or 1.0
+            self.eeg_yabs.append(yabs)
             ax.set_ylim(-yabs, yabs)
-            ax.yaxis.set_major_locator(MaxNLocator(3))
+            ax.set_yticks([])                          # raw trace: no y-axis numbers
+            # vertical cursor marking the current time (centre), matching the
+            # spectrogram cursor above.
+            self.eeg_cursor.append(ax.axvline(mid, color="w", ls="--", lw=0.8))
             if i != n - 1:
                 ax.set_xticklabels([])
         self.ax_eeg[-1].set_xlabel("Time (s)")
 
         self._update_eeg(mid)
+        self._build_sliders()
         self._set_title()
+
+    def _build_sliders(self):
+        """Bottom sliders: LEFT = main time view (window size + sliding position);
+        RIGHT = raw LFP trace (window size + amplitude gain)."""
+        span = self.lims[1] - self.lims[0]
+        self._win_min = min(10.0, span)
+        self._slider_guard = False
+        # left column — main spectrogram/state time view
+        ax_win = self.fig.add_axes([0.11, 0.05, 0.30, 0.016])
+        ax_pos = self.fig.add_axes([0.11, 0.02, 0.30, 0.016])
+        self.win_slider = Slider(ax_win, "Window (s)", self._win_min, span,
+                                 valinit=span, valfmt="%.0f")
+        self.pos_slider = Slider(ax_pos, "Position (s)", self.lims[0], self.lims[1],
+                                 valinit=self.lims[0], valfmt="%.0f")
+        self.win_slider.on_changed(self._on_win_slider)
+        self.pos_slider.on_changed(self._on_pos_slider)
+        # right column — raw LFP trace controls
+        ax_rw = self.fig.add_axes([0.60, 0.05, 0.22, 0.016])
+        ax_rg = self.fig.add_axes([0.60, 0.02, 0.22, 0.016])
+        self.rawwin_slider = Slider(ax_rw, "Raw win (s)", 0.5, min(30.0, span),
+                                    valinit=self.eeg_show, valfmt="%.1f")
+        self.rawgain_slider = Slider(ax_rg, "Raw gain", 0.2, 10.0,
+                                     valinit=self.eeg_scale, valfmt="%.1f")
+        self.rawwin_slider.on_changed(self._on_rawwin_slider)
+        self.rawgain_slider.on_changed(self._on_rawgain_slider)
+        for s in (self.win_slider, self.pos_slider, self.rawwin_slider,
+                  self.rawgain_slider):
+            s.label.set_fontsize(7)
+
+    def _raw_centre(self):
+        return float(np.mean(self.ax_eeg[0].get_xlim()))
+
+    def _on_rawwin_slider(self, val):
+        if self._slider_guard:
+            return
+        self.eeg_show = float(val)
+        self._update_eeg(self._raw_centre())
+        self.fig.canvas.draw_idle()
+
+    def _on_rawgain_slider(self, val):
+        if self._slider_guard:
+            return
+        self.eeg_scale = max(float(val), 1e-6)
+        self._update_eeg(self._raw_centre())
+        self.fig.canvas.draw_idle()
+
+    def _on_win_slider(self, val):
+        if self._slider_guard:
+            return
+        lo, hi = self._xlim_get()
+        centre = (lo + hi) / 2
+        half = float(val) / 2
+        self._set_xlim(centre - half, centre + half)
+
+    def _on_pos_slider(self, val):
+        if self._slider_guard:
+            return
+        lo, hi = self._xlim_get()
+        width = hi - lo                         # keep the current window size
+        start = min(max(float(val), self.lims[0]), self.lims[1] - width)
+        self._set_xlim(start, start + width)
+
+    def _sync_sliders(self, lo, hi):
+        """Reflect the current x-limits back onto the sliders (no feedback loop)."""
+        if not hasattr(self, "win_slider"):
+            return
+        self._slider_guard = True
+        try:
+            self.win_slider.set_val(np.clip(hi - lo, self.win_slider.valmin,
+                                            self.win_slider.valmax))
+            self.pos_slider.set_val(np.clip(lo, self.pos_slider.valmin,
+                                            self.pos_slider.valmax))
+        finally:
+            self._slider_guard = False
 
     # --------------------------------------------------------------- side panel
     def _build_side_panel(self):
@@ -360,8 +508,10 @@ class StateEditor:
         self.ax_state.clear()
         self._plot_hypnogram(self.ax_state, self.states)
         self.ax_state.set_yticks([1, 2, 3, 4, 5])
+        self.ax_state.set_yticklabels(["W", "L", "N", "I", "R"], fontsize=7)
         self.ax_state.set_xticks([])
-        self.ax_state.set_ylabel("State")
+        self.ax_state.set_ylabel("Manual", fontsize=8.5, fontweight="bold",
+                                 rotation=0, ha="right", va="center", labelpad=8)
         self.ax_state.set_xlim(getattr(self, "_xlim", self.lims))
 
     def _plot_hypnogram(self, ax, states):
@@ -403,10 +553,11 @@ class StateEditor:
             return
         self.ax_auto.clear()
         self._plot_hypnogram(self.ax_auto, self.auto_states)
-        self.ax_auto.set_yticks([1, 3, 5])
-        self.ax_auto.set_yticklabels(["W", "N", "R"], fontsize=7)
+        self.ax_auto.set_yticks([1, 2, 3, 4, 5])
+        self.ax_auto.set_yticklabels(["W", "L", "N", "I", "R"], fontsize=7)
         self.ax_auto.set_xticks([])
-        self.ax_auto.set_ylabel(self.auto_label, fontsize=8)
+        self.ax_auto.set_ylabel(self.auto_label, fontsize=8.5, fontweight="bold",
+                                rotation=0, ha="right", va="center", labelpad=8)
         self.ax_auto.set_xlim(getattr(self, "_xlim", self.lims))
 
     # ------------------------------------------------------------------ events
@@ -436,6 +587,15 @@ class StateEditor:
     def _set_xlim(self, lo, hi):
         lo = max(lo, self.lims[0])
         hi = min(hi, self.lims[1])
+        # enforce a minimum view window: each scored epoch spans >= 10 s
+        min_win = min(MIN_VIEW_WINDOW, self.lims[1] - self.lims[0])
+        if hi - lo < min_win:
+            c = (lo + hi) / 2
+            lo, hi = c - min_win / 2, c + min_win / 2
+            if lo < self.lims[0]:
+                lo, hi = self.lims[0], self.lims[0] + min_win
+            elif hi > self.lims[1]:
+                lo, hi = self.lims[1] - min_win, self.lims[1]
         self._xlim = (lo, hi)
         for ax in self.ax_spec:
             ax.set_xlim(lo, hi)
@@ -443,7 +603,10 @@ class StateEditor:
         self.ax_state.set_xlim(lo, hi)
         if self.ax_auto is not None:
             self.ax_auto.set_xlim(lo, hi)
-        self._update_eeg((lo + hi) / 2)
+        # keep the time cursor in view, then redraw the LFP at the cursor
+        self.cursor_time = float(np.clip(self.cursor_time, lo, hi))
+        self._update_eeg(self.cursor_time)
+        self._sync_sliders(lo, hi)
         if hasattr(self, "info_text"):
             self._update_info()
         self.fig.canvas.draw_idle()
@@ -461,8 +624,44 @@ class StateEditor:
         for i, ln in enumerate(self.eeg_lines):
             ln.set_data(self.eeg_x[m], self.eeg[i][m])
             self.ax_eeg[i].set_xlim(low, high)
+            yl = self.eeg_yabs[i] / self.eeg_scale
+            self.ax_eeg[i].set_ylim(-yl, yl)
+            self.eeg_cursor[i].set_xdata([centre, centre])
         for ln in self.cursor_lines:
             ln.set_xdata([centre, centre])
+
+    def _move_cursor(self, direction):
+        """Step the time cursor by one bin (← →), scrolling the view to follow."""
+        self.cursor_time = float(np.clip(self.cursor_time + direction * self._dt,
+                                         self.lims[0], self.lims[1]))
+        lo, hi = self._xlim_get()
+        w = hi - lo
+        if self.cursor_time < lo:
+            self._set_xlim(self.cursor_time, self.cursor_time + w)
+        elif self.cursor_time > hi:
+            self._set_xlim(self.cursor_time - w, self.cursor_time)
+        else:
+            self._update_eeg(self.cursor_time)
+            if hasattr(self, "info_text"):
+                self._update_info()
+            self.fig.canvas.draw_idle()
+
+    def _confirm_boundary(self):
+        """Space: confirm the cursor as an epoch bound. 1st = start, 2nd = apply.
+
+        With a state armed, number → space → space brackets an epoch (a double
+        space at one spot assigns a single ≥10 s epoch there)."""
+        if self.current_state is None:
+            return
+        if self.pending_bound is None:
+            self.pending_bound = self.cursor_time
+            for ax in self.ax_spec + [self.ax_motion, self.ax_state]:
+                self.pending_line.append(ax.axvline(self.cursor_time, color="r", lw=1.0))
+            self.fig.canvas.draw_idle()
+        else:
+            self._apply_state(self.pending_bound, self.cursor_time, self.current_state)
+            self.pending_bound = None
+            self._clear_pending_line()
 
     def _on_key(self, event):
         k = event.key
@@ -498,8 +697,12 @@ class StateEditor:
         elif k in ("n", "p"):
             self._jump_event(forward=(k == "n"))
         elif k in ("right", "left"):
+            self._move_cursor(1 if k == "right" else -1)
+        elif k in (" ", "space"):
+            self._confirm_boundary()
+        elif k in ("shift+right", "shift+left"):    # coarse pan (whole window)
             lo, hi = self._xlim_get()
-            step = PAN_FRAC * (hi - lo) * (1 if k == "right" else -1)
+            step = (hi - lo) * (1 if k == "shift+right" else -1)
             self._set_xlim(lo + step, hi + step)
         elif k == "home":
             lo, hi = self._xlim_get()
@@ -534,6 +737,14 @@ class StateEditor:
         else:                              # narrow
             prv = [s for s in EEG_STEPS if s < cur - 1e-9]
             self.eeg_show = prv[-1] if prv else EEG_STEPS[0]
+        if hasattr(self, "rawwin_slider"):     # keep the slider in sync
+            self._slider_guard = True
+            try:
+                self.rawwin_slider.set_val(np.clip(self.eeg_show,
+                                                   self.rawwin_slider.valmin,
+                                                   self.rawwin_slider.valmax))
+            finally:
+                self._slider_guard = False
         self._update_eeg(np.mean(self.ax_eeg[0].get_xlim()))
         self.fig.canvas.draw_idle()
 
@@ -562,21 +773,25 @@ class StateEditor:
             self._delete_event(event.xdata)
             return
 
+        # a click always moves the time cursor to that spot
+        self.cursor_time = float(event.xdata)
         if self.current_state is None:
             # browse: centre LFP view on the click
-            self._update_eeg(event.xdata)
+            self._update_eeg(self.cursor_time)
+            if hasattr(self, "info_text"):
+                self._update_info()
             self.fig.canvas.draw_idle()
             return
 
         # scoring: first click sets a bound, second applies the state
         if self.pending_bound is None:
-            self.pending_bound = event.xdata
+            self.pending_bound = self.cursor_time
             for ax in self.ax_spec + [self.ax_motion, self.ax_state]:
-                self.pending_line.append(ax.axvline(event.xdata, color="r", lw=1.0))
+                self.pending_line.append(ax.axvline(self.cursor_time, color="r", lw=1.0))
+            self._update_eeg(self.cursor_time)
             self.fig.canvas.draw_idle()
         else:
-            t0, t1 = sorted((self.pending_bound, event.xdata))
-            self._apply_state(t0, t1, self.current_state)
+            self._apply_state(self.pending_bound, self.cursor_time, self.current_state)
             self.pending_bound = None
             self._clear_pending_line()
 
@@ -591,6 +806,14 @@ class StateEditor:
         i1 = min(self.n_bins - 1, matlab_round(t1 - self.to[0]))
         if i1 < i0:
             return
+        # enforce a minimum scored epoch of MIN_EPOCH_S seconds (expand about the
+        # selection centre if the user picked a shorter span)
+        dt = np.median(np.diff(self.to)) if self.n_bins > 1 else 1.0
+        min_bins = min(self.n_bins, max(1, int(round(MIN_EPOCH_S / dt))))
+        if (i1 - i0 + 1) < min_bins:
+            centre = (i0 + i1) // 2
+            i0 = max(0, min(centre - min_bins // 2, self.n_bins - min_bins))
+            i1 = i0 + min_bins - 1
         self.history.append((i0, i1, self.states[i0:i1 + 1].copy()))
         self.states[i0:i1 + 1] = state
         self._mark_dirty()

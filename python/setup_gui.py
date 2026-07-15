@@ -27,7 +27,7 @@ MOTION_MODES = {
 # auto-detected motion files, in priority order (raw accelerometer first, to
 # suit the default Accelerometer mode)
 EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
-                  "theta_delta_ratio.npy", "awakeness.npy"]
+                  "theta_delta_ratio.npy"]
 
 # LFP for sleep scoring is ~250–2000 Hz. Anything above this is the raw
 # acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
@@ -43,9 +43,9 @@ class SetupGUI:
 
         self.root = tk.Tk()
         self.root.title("Sleep Score Setup")
-        self.root.geometry("620x470")
-        self.root.minsize(560, 470)
-        self.root.resizable(True, False)
+        self.root.geometry("790x560")
+        self.root.minsize(680, 540)
+        self.root.resizable(True, True)
         self._bring_to_front()
         self._build()
 
@@ -131,9 +131,31 @@ class SetupGUI:
         # Buzsáki auto-scoring: shown as an extra panel in the editor. Loads a
         # saved buzsaki_states.npz if present, or computes one when ticked.
         self.buzsaki_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(params, text="Show Buzsáki auto-score (compute if missing)",
+        tk.Checkbutton(params, text="Show Buzsáki auto-score (recompute on open)",
                        variable=self.buzsaki_var).grid(
             row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        # Editable scoring thresholds — multipliers on the auto (bimodal) thresholds
+        # (1.0 = auto; lower = more permissive), plus drowsy-band width & min epoch.
+        import buzsaki_score as _bz
+        thr = tk.Frame(params)
+        thr.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        tk.Label(thr, text="Thresholds:", font=("Helvetica", 9, "bold")).grid(
+            row=0, column=0, sticky="w")
+        self.swf_var = tk.StringVar(value="1.0")
+        self.thf_var = tk.StringVar(value=str(_bz.TH_THRESH_FACTOR))
+        self.emgf_var = tk.StringVar(value="1.0")
+        self.drowsy_var = tk.StringVar(value=str(_bz.DROWSY_FRAC))
+        self.minsec_var = tk.StringVar(value="10")
+        fields = [("SW× (NREM)", self.swf_var), ("θ× (REM)", self.thf_var),
+                  ("EMG× (wake)", self.emgf_var), ("drowsy", self.drowsy_var),
+                  ("min ep (s)", self.minsec_var)]
+        for i, (lbl, var) in enumerate(fields):
+            tk.Label(thr, text=lbl).grid(row=0, column=1 + 2 * i, padx=(8, 1))
+            tk.Entry(thr, textvariable=var, width=5).grid(row=0, column=2 + 2 * i)
+        tk.Label(thr, text="1.0 = auto  ·  ↓SW = more sleep  ·  ↓θ = more REM  ·  "
+                 "↓EMG = more wake", fg="#777777").grid(
+            row=1, column=1, columnspan=10, sticky="w", pady=(1, 0))
 
         # Status + launch
         self.status = tk.Label(self.root, text="Ready. Select an LFP folder to begin.",
@@ -198,6 +220,14 @@ class SetupGUI:
         else:
             self._set_status("Folder loaded. Enter channels, then Launch.", "#000000")
             self._show_recording_info(folder)
+            # Auto-detect the rat_sessiondate_ prefix from the folder's files and
+            # use it as the session name, so saved files share the session naming.
+            from processing import output_prefix
+            pfx = output_prefix(folder)
+            if pfx:
+                self.name_var.set(pfx.rstrip("_"))
+                self._set_status(f"Folder loaded. Session: {pfx.rstrip('_')}. "
+                                 f"Enter channels, then Launch.", "#000000")
 
         self.emg_file = ""
         for cand in EMG_CANDIDATES:
@@ -262,9 +292,11 @@ class SetupGUI:
         base = self.name_var.get().strip() or "session"
         # Prefix saved files (-states.mat, cache) with the session's rat_sessiondate_
         # already on the LFP folder, so every generated file shares one naming.
+        # The Name field is auto-filled with the detected session token on folder
+        # select, so skip re-prefixing when it already carries that token.
         from processing import output_prefix
         pfx = output_prefix(self.lfp_folder)
-        if pfx and not base.startswith(pfx):
+        if pfx and not base.startswith(pfx) and not base.startswith(pfx.rstrip("_")):
             base = f"{pfx}{base}"
         try:
             self._run(chs, eeg_fs, base)
@@ -323,11 +355,13 @@ class SetupGUI:
                 print(f"Warning: could not write cache: {exc}")
 
         auto_states, auto_ts = self._buzsaki_labels(chs)
+        overlays = self._load_overlays()
 
         self._set_status("Launching state editor ...", "#007000")
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
                              out_folder=self.out_folder, chs=chs,
-                             auto_states=auto_states, auto_states_ts=auto_ts)
+                             auto_states=auto_states, auto_states_ts=auto_ts,
+                             overlays=overlays)
         self.root.withdraw()
         editor.show()
         self.root.deiconify()
@@ -336,27 +370,76 @@ class SetupGUI:
     def _buzsaki_labels(self, chs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).
 
-        Loads a saved buzsaki_states.npz from the LFP or output folder; if none
-        exists and the checkbox is ticked, computes one from the LFP folder.
+        Recomputes fresh from the LFP folder every time (so scorer changes always
+        take effect) and overwrites buzsaki_states.npz. Only falls back to a saved
+        npz if the recompute fails.
         """
         if not self.buzsaki_var.get():
             return None, None
         import buzsaki_score as bz
-        for folder in (self.lfp_folder, self.out_folder):
-            f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
-            if f is not None:
-                self._set_status(f"Loaded Buzsáki labels: {f}", "#006600")
-                return bz.load_states(f)
+
+        def _f(var, default):
+            try:
+                return float(var.get())
+            except (ValueError, tk.TclError):
+                return default
+        kw = dict(sw_factor=_f(self.swf_var, 1.0),
+                  th_factor=_f(self.thf_var, bz.TH_THRESH_FACTOR),
+                  emg_factor=_f(self.emgf_var, 1.0),
+                  drowsy_frac=_f(self.drowsy_var, bz.DROWSY_FRAC),
+                  min_secs=_f(self.minsec_var, 10.0))
         try:
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
-            res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0])
+            res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0], **kw)
             from processing import output_prefix
             pfx = output_prefix(self.lfp_folder)
             bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
+            self._set_status("Buzsáki auto-score recomputed.", "#006600")
             return res["states"], res["timestamps"]
         except Exception as exc:
+            for folder in (self.lfp_folder, self.out_folder):
+                f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
+                if f is not None:
+                    self._set_status(f"Compute failed; loaded saved labels ({exc})",
+                                     "#cc6600")
+                    return bz.load_states(f)
             self._set_status(f"Buzsáki auto-score skipped: {exc}", "#cc6600")
             return None, None
+
+    def _load_overlays(self):
+        """Load EMG-from-LFP + theta/delta signals to overlay on the motion axis.
+
+        Returns a list of (label, values, timestamps|None); each is z-scored and
+        aligned to the session's 1 s bins by the editor. Missing files are skipped.
+        (Awakeness is not overlaid — it mixes EMG with theta/delta, so it reads as
+        high in REM. We show theta/delta itself instead: high in REM + active WAKE,
+        low in NREM — cleanly complementing the EMG/motion traces.)
+        """
+        overlays = []
+        # EMG-from-LFP (5 Hz, has its own timestamps)
+        ef = find_output(self.lfp_folder, "emg_from_lfp_5hz.npy") or \
+            find_output(self.lfp_folder, "emg_from_lfp.npy")
+        if ef is not None:
+            try:
+                emg = np.load(ef).ravel()
+                tsf = find_output(self.lfp_folder, "emg_from_lfp_timestamps.npy")
+                ets = np.load(tsf).ravel() if tsf is not None else None
+                overlays.append(("EMG", emg, ets))
+            except Exception as exc:
+                print(f"Warning: could not load EMG overlay: {exc}")
+        # theta/delta ratio (full LFP rate) — log-scaled (heavily skewed),
+        # decimated, and smoothed (~15 s) so the NREM/REM trend is legible.
+        tf = find_output(self.lfp_folder, "theta_delta_ratio.npy")
+        if tf is not None:
+            try:
+                td = np.asarray(np.load(tf, mmap_mode="r")[::100], dtype=float)
+                td = np.log10(np.clip(td, 1e-6, None))
+                from scipy.ndimage import uniform_filter1d
+                td = uniform_filter1d(td, size=225, mode="nearest")  # ~15 s @ 15 Hz
+                overlays.append(("theta/delta", td, None))
+            except Exception as exc:
+                print(f"Warning: could not load theta/delta overlay: {exc}")
+        return overlays
 
     def run(self):
         self.root.mainloop()
