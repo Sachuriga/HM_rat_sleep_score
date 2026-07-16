@@ -15,21 +15,23 @@ import os
 
 import numpy as np
 import matplotlib
-
-# Use an interactive Tk backend by default, but honour an explicit MPLBACKEND
-# (e.g. "Agg" for headless testing).
-if "MPLBACKEND" not in os.environ:
-    try:
-        matplotlib.use("TkAgg")
-    except Exception:
-        pass
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.widgets import Slider
 from scipy.io import loadmat, savemat
 from scipy.signal.windows import hann
 
 from processing import matlab_round
+
+# The editor window is Qt (PyQt6). Importing Qt needs no running QApplication,
+# so this is safe even in headless tests (which set MPLBACKEND=Agg and never
+# build a window — see _setup_backend).
+try:
+    from PyQt6.QtCore import Qt, QEventLoop
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
+    _HAVE_QT = True
+except Exception:                                   # pragma: no cover
+    _HAVE_QT = False
 
 # State -> RGB (0-1), taken from TheStateEditor.m
 STATE_COLORS = {
@@ -77,6 +79,28 @@ HELP_LINES = [
 ]
 
 EVENT_COLOR = "magenta"
+
+
+if _HAVE_QT:
+    class _EditorWindow(QMainWindow):
+        """Top-level Qt window hosting the editor's matplotlib canvas.
+
+        Closing it runs the editor's unsaved-changes prompt and stops the nested
+        event loop that ``StateEditor.show()`` spins."""
+
+        def __init__(self, editor):
+            super().__init__()
+            self._editor = editor
+            self._loop = None
+
+        def closeEvent(self, ev):
+            if not self._editor._confirm_close():
+                ev.ignore()
+                return
+            ev.accept()
+            if self._loop is not None:
+                self._loop.quit()
+                self._loop = None
 
 
 class StateEditor:
@@ -143,10 +167,10 @@ class StateEditor:
         self.event_mode = None      # None | 'add' | 'delete'
         self.event_artists = []     # drawn vertical lines + labels
 
+        self._setup_backend()
         self._build_figure()
         self._build_side_panel()
         self._connect()
-        self._install_close_handler()
 
     def _align_auto_states(self, auto_states, auto_states_ts):
         """Resample provided auto-labels onto this session's 1 s bins (nearest)."""
@@ -228,6 +252,32 @@ class StateEditor:
                 out[i] = s * (max1 - min1) + min1
         return out, binned_fo
 
+    def _setup_backend(self):
+        """Create the Figure and attach a canvas.
+
+        Interactive: a Qt window (``_EditorWindow``) with a ``FigureCanvasQTAgg``.
+        Headless (``MPLBACKEND=Agg``, e.g. tests, or no Qt): a bare Agg canvas
+        and no window, so the editor can be built and driven without a display."""
+        self.fig = Figure(figsize=(16, 9.6), dpi=110)
+        self.fig.patch.set_facecolor("#f4f5f7")
+        headless = os.environ.get("MPLBACKEND", "").lower() == "agg" or not _HAVE_QT
+        if headless:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            FigureCanvasAgg(self.fig)               # sets self.fig.canvas
+            self.win = None
+        else:
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+            self.win = _EditorWindow(self)
+            canvas = FigureCanvasQTAgg(self.fig)    # sets self.fig.canvas
+            self.win.setCentralWidget(canvas)
+            self.win.resize(1500, 900)
+            canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.canvas = self.fig.canvas
+
+    def _set_window_title(self, text):
+        if getattr(self, "win", None) is not None:
+            self.win.setWindowTitle(text)
+
     def _build_figure(self):
         # free the editor's single-key shortcuts from matplotlib's default keymap
         # (← → s p h r l etc. are otherwise hijacked for nav / save / log-scale)
@@ -235,8 +285,8 @@ class StateEditor:
                           ("keymap.home", []), ("keymap.pan", []),
                           ("keymap.save", ["ctrl+s"]), ("keymap.yscale", []),
                           ("keymap.xscale", []), ("keymap.zoom", [])]:
-            plt.rcParams[key] = keep
-        plt.rcParams.update({
+            matplotlib.rcParams[key] = keep
+        matplotlib.rcParams.update({
             "font.family": "sans-serif", "font.size": 9,
             "axes.titlesize": 10, "axes.labelsize": 9,
             "axes.edgecolor": "#8a8f98", "axes.linewidth": 0.8,
@@ -244,9 +294,7 @@ class StateEditor:
             "xtick.labelsize": 8, "ytick.labelsize": 8,
             "figure.facecolor": "#f4f5f7", "axes.facecolor": "#ffffff",
         })
-        self.fig = plt.figure(figsize=(16, 9.6), dpi=120)
-        self.fig.patch.set_facecolor("#f4f5f7")
-        self.fig.canvas.manager.set_window_title(f"Sleep scoring — {self.base_name}")
+        self._set_window_title(f"Sleep scoring — {self.base_name}")
 
         n = self.n_ch
         left, width = 0.065, 0.80
@@ -418,9 +466,9 @@ class StateEditor:
         ax.text(0.0, 0.99, "States", fontsize=11, fontweight="bold", va="top")
         for i, s in enumerate([1, 2, 3, 4, 5, 0]):
             y = 0.92 - i * 0.058
-            ax.add_patch(plt.Rectangle((0.0, y - 0.035), 0.16, 0.045,
-                                       facecolor=STATE_COLORS[s],
-                                       edgecolor="0.4", lw=0.6))
+            ax.add_patch(Rectangle((0.0, y - 0.035), 0.16, 0.045,
+                                   facecolor=STATE_COLORS[s],
+                                   edgecolor="0.4", lw=0.6))
             ax.text(0.21, y - 0.013, f"{s}  {STATE_NAMES[s]}", fontsize=9, va="center")
         ax.text(0.0, 0.50, "Press 'h' for help", fontsize=8.5,
                 style="italic", color="0.35", va="top")
@@ -477,28 +525,21 @@ class StateEditor:
         self.help_overlay.set_visible(self.help_visible)
         self.fig.canvas.draw_idle()
 
-    def _install_close_handler(self):
-        """Warn about unsaved work when closing (TkAgg only; no-op elsewhere)."""
-        try:
-            win = self.fig.canvas.manager.window
-            win.protocol("WM_DELETE_WINDOW", self._on_close_request)
-        except Exception:
-            pass
+    def _confirm_close(self):
+        """Return True if the window may close, prompting to save when dirty.
 
-    def _on_close_request(self):
-        if self.dirty:
-            try:
-                from tkinter import messagebox
-                resp = messagebox.askyesnocancel(
-                    "Unsaved changes",
-                    "Save state scoring before closing?")
-                if resp is None:           # cancel -> stay open
-                    return
-                if resp:                   # yes -> save then close
-                    self.save_states()
-            except Exception:
-                pass
-        plt.close(self.fig)
+        Called from ``_EditorWindow.closeEvent``. Cancel keeps the window open."""
+        if not self.dirty or not _HAVE_QT or self.win is None:
+            return True
+        resp = QMessageBox.question(
+            self.win, "Unsaved changes", "Save state scoring before closing?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel)
+        if resp == QMessageBox.StandardButton.Cancel:
+            return False
+        if resp == QMessageBox.StandardButton.Yes:
+            self.save_states()
+        return True
 
     def _mark_dirty(self):
         self.dirty = True
@@ -576,7 +617,7 @@ class StateEditor:
         elif self.event_mode == "delete":
             extra = f" - Delete Event {self.event_num} (click near a mark)"
         star = "*" if getattr(self, "dirty", False) else ""
-        self.fig.canvas.manager.set_window_title(f"States: {self.base_name}{star}{extra}")
+        self._set_window_title(f"States: {self.base_name}{star}{extra}")
         if hasattr(self, "info_text"):
             self._update_info()
             self.fig.canvas.draw_idle()
@@ -946,4 +987,24 @@ class StateEditor:
                 print(f"Loaded {len(self.events)} events")
 
     def show(self):
-        plt.show()
+        """Show the editor window and block until it is closed.
+
+        Uses a nested Qt event loop so a caller (the setup GUI) can invoke this
+        synchronously from within the already-running application loop, the same
+        way ``QDialog.exec()`` blocks. No-op when built headlessly."""
+        if self.win is None:
+            return
+        owns_app = False
+        if QApplication.instance() is None:         # standalone use
+            self._app = QApplication([])
+            owns_app = True
+        self.win.show()
+        self.win.raise_()
+        self.win.activateWindow()
+        self.canvas.setFocus()
+        if owns_app:
+            self._app.exec()
+        else:
+            loop = QEventLoop()
+            self.win._loop = loop
+            loop.exec()

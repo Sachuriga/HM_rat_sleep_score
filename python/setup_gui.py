@@ -1,4 +1,4 @@
-"""Setup GUI - Python port of ``Sleep_score_HM_neuron.m``.
+"""Setup GUI - Python port of ``Sleep_score_HM_neuron.m`` (PyQt6).
 
 Pick an LFP folder, enter three channel numbers, auto-detect the motion/EMG
 file, choose an output folder and parameters, then launch the state editor.
@@ -7,10 +7,16 @@ file, choose an output folder and parameters, then launch the state editor.
 from __future__ import annotations
 
 import os
-import tkinter as tk
-from tkinter import filedialog, ttk
+import sys
 
 import numpy as np
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QGroupBox,
+    QFileDialog, QSizePolicy,
+)
 
 from processing import (compute_channel_spectrogram, process_motion,
                         detect_sampling_rate, cache_path, save_cache, load_cache,
@@ -34,148 +40,154 @@ EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
 LFP_FS_MAX = 5000
 
 
-class SetupGUI:
+class SetupGUI(QMainWindow):
     def __init__(self):
+        super().__init__()
         self.lfp_folder = ""
         self.emg_file = ""
         self.out_folder = ""
         self.lfp_source = None      # dict from find_lfp_source, set on folder select
 
-        self.root = tk.Tk()
-        self.root.title("Sleep Score Setup")
-        self.root.geometry("790x560")
-        self.root.minsize(680, 540)
-        self.root.resizable(True, True)
-        self._bring_to_front()
+        self.setWindowTitle("Sleep Score Setup")
+        self.resize(820, 620)
+        self.setMinimumSize(700, 560)
         self._build()
-
-    def _bring_to_front(self):
-        """Force the window (and its dialogs) to the foreground on macOS."""
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after_idle(self.root.attributes, "-topmost", False)
-        self.root.focus_force()
 
     # ------------------------------------------------------------------ layout
     def _build(self):
-        # Column 0 (entries) stretches; column 1 (Browse buttons) stays fixed.
-        self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_columnconfigure(1, weight=0)
+        root = QWidget()
+        self.setCentralWidget(root)
+        v = QVBoxLayout(root)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(6)
 
-        def header(text, row):
-            tk.Label(self.root, text=text, font=("Helvetica", 11, "bold"),
-                     anchor="w").grid(row=row, column=0, columnspan=2,
-                                      sticky="w", padx=12, pady=(8, 2))
+        def header(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("font-weight:700;")
+            v.addWidget(lbl)
+
+        def path_row(edit, browse_cb):
+            row = QHBoxLayout()
+            edit.setReadOnly(True)
+            row.addWidget(edit, 1)
+            btn = QPushButton("Browse…")
+            btn.clicked.connect(browse_cb)
+            row.addWidget(btn)
+            v.addLayout(row)
 
         # LFP folder
-        header("LFP Output Folder", 0)
-        self.lfp_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.lfp_var, state="readonly").grid(
-            row=1, column=0, sticky="we", padx=(12, 4))
-        tk.Button(self.root, text="Browse...", command=self._sel_lfp).grid(
-            row=1, column=1, padx=(0, 12), sticky="e")
+        header("LFP Output Folder")
+        self.lfp_edit = QLineEdit()
+        path_row(self.lfp_edit, self._sel_lfp)
 
         # Channels
-        header("Channel Numbers (1-N)", 2)
-        self.ch_vars = []
-        chframe = tk.Frame(self.root)
-        chframe.grid(row=3, column=0, columnspan=2, sticky="w", padx=12)
+        header("Channel Numbers (1-N)")
+        chrow = QHBoxLayout()
+        self.ch_edits = []
         for k in range(3):
-            tk.Label(chframe, text=f"Ch {k + 1}:").grid(row=0, column=2 * k, padx=(0, 2))
-            v = tk.StringVar(value=str(k + 1))
-            self.ch_vars.append(v)
-            tk.Entry(chframe, textvariable=v, width=6).grid(row=0, column=2 * k + 1, padx=(0, 14))
+            chrow.addWidget(QLabel(f"Ch {k + 1}:"))
+            e = QLineEdit(str(k + 1))
+            e.setFixedWidth(56)
+            self.ch_edits.append(e)
+            chrow.addWidget(e)
+            chrow.addSpacing(12)
+        chrow.addStretch(1)
+        v.addLayout(chrow)
 
         # Motion / EMG
-        header("Motion / EMG File", 4)
-        self.emg_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.emg_var, state="readonly").grid(
-            row=5, column=0, sticky="we", padx=(12, 4))
-        tk.Button(self.root, text="Browse...", command=self._sel_emg).grid(
-            row=5, column=1, padx=(0, 12), sticky="e")
-        self.emg_auto = tk.Label(self.root, text="", fg="#007000", anchor="w")
-        self.emg_auto.grid(row=6, column=0, columnspan=2, sticky="w", padx=12)
+        header("Motion / EMG File")
+        self.emg_edit = QLineEdit()
+        path_row(self.emg_edit, self._sel_emg)
+        self.emg_auto = QLabel("")
+        v.addWidget(self.emg_auto)
 
         # Output folder
-        header("Output / Save Folder", 7)
-        self.out_var = tk.StringVar()
-        tk.Entry(self.root, textvariable=self.out_var, state="readonly").grid(
-            row=8, column=0, sticky="we", padx=(12, 4))
-        tk.Button(self.root, text="Browse...", command=self._sel_out).grid(
-            row=8, column=1, padx=(0, 12), sticky="e")
+        header("Output / Save Folder")
+        self.out_edit = QLineEdit()
+        path_row(self.out_edit, self._sel_out)
 
         # Recording info (channels / duration, filled in after folder select)
-        self.info_label = tk.Label(self.root, text="", fg="#444444", anchor="w")
-        self.info_label.grid(row=9, column=0, columnspan=2, sticky="w", padx=12)
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("color:#444444;")
+        self.info_label.setWordWrap(True)
+        v.addWidget(self.info_label)
 
         # Parameters
-        params = tk.Frame(self.root)
-        params.grid(row=10, column=0, columnspan=2, sticky="w", padx=12, pady=6)
-        tk.Label(params, text="Sampling Rate (Hz):").grid(row=0, column=0)
-        self.fs_var = tk.StringVar(value="1500")
-        tk.Entry(params, textvariable=self.fs_var, width=8).grid(row=0, column=1, padx=(2, 20))
-        tk.Label(params, text="Session Name:").grid(row=0, column=2)
-        self.name_var = tk.StringVar(value="HM_neurons")
-        tk.Entry(params, textvariable=self.name_var, width=14).grid(row=0, column=3, padx=2)
-        tk.Label(params, text="Motion type:").grid(row=1, column=0, pady=(6, 0), sticky="w")
-        self.motion_mode_var = tk.StringVar(value="Accelerometer (case 3)")
-        ttk.Combobox(params, textvariable=self.motion_mode_var, state="readonly",
-                     values=list(MOTION_MODES.keys()), width=26).grid(
-            row=1, column=1, columnspan=3, sticky="w", padx=(2, 0), pady=(6, 0))
+        params = QGroupBox("Parameters")
+        pg = QGridLayout(params)
+        pg.addWidget(QLabel("Sampling Rate (Hz):"), 0, 0)
+        self.fs_edit = QLineEdit("1500")
+        self.fs_edit.setFixedWidth(80)
+        pg.addWidget(self.fs_edit, 0, 1)
+        pg.addWidget(QLabel("Session Name:"), 0, 2)
+        self.name_edit = QLineEdit("HM_neurons")
+        pg.addWidget(self.name_edit, 0, 3)
+        pg.addWidget(QLabel("Motion type:"), 1, 0)
+        self.motion_combo = QComboBox()
+        self.motion_combo.addItems(list(MOTION_MODES.keys()))
+        pg.addWidget(self.motion_combo, 1, 1, 1, 3)
 
-        self.recompute_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(params, text="Ignore cache (recompute)",
-                       variable=self.recompute_var).grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.recompute_chk = QCheckBox("Ignore cache (recompute)")
+        pg.addWidget(self.recompute_chk, 2, 0, 1, 4)
 
         # Buzsáki auto-scoring: shown as an extra panel in the editor. Loads a
         # saved buzsaki_states.npz if present, or computes one when ticked.
-        self.buzsaki_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(params, text="Show Buzsáki auto-score (recompute on open)",
-                       variable=self.buzsaki_var).grid(
-            row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.buzsaki_chk = QCheckBox("Show Buzsáki auto-score (recompute on open)")
+        self.buzsaki_chk.setChecked(True)
+        pg.addWidget(self.buzsaki_chk, 3, 0, 1, 4)
 
         # Editable scoring thresholds — multipliers on the auto (bimodal) thresholds
         # (1.0 = auto; lower = more permissive), plus drowsy-band width & min epoch.
         import buzsaki_score as _bz
-        thr = tk.Frame(params)
-        thr.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        tk.Label(thr, text="Thresholds:", font=("Helvetica", 9, "bold")).grid(
-            row=0, column=0, sticky="w")
-        self.swf_var = tk.StringVar(value="1.0")
-        self.thf_var = tk.StringVar(value=str(_bz.TH_THRESH_FACTOR))
-        self.emgf_var = tk.StringVar(value="1.0")
-        self.drowsy_var = tk.StringVar(value=str(_bz.DROWSY_FRAC))
-        self.minsec_var = tk.StringVar(value="10")
-        fields = [("SW× (NREM)", self.swf_var), ("θ× (REM)", self.thf_var),
-                  ("EMG× (wake)", self.emgf_var), ("drowsy", self.drowsy_var),
-                  ("min ep (s)", self.minsec_var)]
-        for i, (lbl, var) in enumerate(fields):
-            tk.Label(thr, text=lbl).grid(row=0, column=1 + 2 * i, padx=(8, 1))
-            tk.Entry(thr, textvariable=var, width=5).grid(row=0, column=2 + 2 * i)
-        tk.Label(thr, text="1.0 = auto  ·  ↓SW = more sleep  ·  ↓θ = more REM  ·  "
-                 "↓EMG = more wake", fg="#777777").grid(
-            row=1, column=1, columnspan=10, sticky="w", pady=(1, 0))
+        thr = QHBoxLayout()
+        lab = QLabel("Thresholds:")
+        lab.setStyleSheet("font-weight:700;")
+        thr.addWidget(lab)
+        self.swf_edit = QLineEdit("1.0")
+        self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
+        self.emgf_edit = QLineEdit("1.0")
+        self.drowsy_edit = QLineEdit(str(_bz.DROWSY_FRAC))
+        self.minsec_edit = QLineEdit("10")
+        for lbl, edit in [("SW× (NREM)", self.swf_edit), ("θ× (REM)", self.thf_edit),
+                          ("EMG× (wake)", self.emgf_edit), ("drowsy", self.drowsy_edit),
+                          ("min ep (s)", self.minsec_edit)]:
+            thr.addSpacing(8)
+            thr.addWidget(QLabel(lbl))
+            edit.setFixedWidth(48)
+            thr.addWidget(edit)
+        thr.addStretch(1)
+        pg.addLayout(thr, 4, 0, 1, 4)
+        hint = QLabel("1.0 = auto  ·  ↓SW = more sleep  ·  ↓θ = more REM  ·  ↓EMG = more wake")
+        hint.setStyleSheet("color:#777777;")
+        pg.addWidget(hint, 5, 0, 1, 4)
+        v.addWidget(params)
 
         # Status + launch
-        self.status = tk.Label(self.root, text="Ready. Select an LFP folder to begin.",
-                               fg="#333333", anchor="w", wraplength=560, justify="left")
-        self.status.grid(row=11, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
+        self.status = QLabel("Ready. Select an LFP folder to begin.")
+        self.status.setStyleSheet("color:#333333;")
+        self.status.setWordWrap(True)
+        v.addWidget(self.status)
 
-        tk.Button(self.root, text="Launch State Editor", font=("Helvetica", 12, "bold"),
-                  bg="#2e8b2e", fg="white", command=self._launch).grid(
-            row=12, column=0, columnspan=2, pady=10, ipadx=20, ipady=8)
+        v.addStretch(1)
+        launch = QPushButton("Launch State Editor")
+        launch.setStyleSheet(
+            "QPushButton{background:#2e8b2e; color:white; font-size:14px; "
+            "font-weight:700; padding:10px;} QPushButton:hover{background:#37a337;}")
+        launch.clicked.connect(self._launch)
+        launch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        v.addWidget(launch)
 
     # ------------------------------------------------------------------ helpers
     def _set_status(self, msg, color="#333333"):
-        self.status.config(text=msg, fg=color)
-        self.root.update()
+        self.status.setText(msg)
+        self.status.setStyleSheet(f"color:{color};")
+        QApplication.processEvents()
 
     def _show_recording_info(self, folder):
         """Display channel count + duration and auto-fill the sampling rate."""
         src = self.lfp_source
         if src is None:
-            self.info_label.config(text="")
+            self.info_label.setText("")
             return
         n_samples = src["n_samples"]
         chans = src["channels"]
@@ -189,34 +201,33 @@ class SetupGUI:
         # default and warn instead of silently adopting the raw rate.
         if fs and fs > LFP_FS_MAX:
             rate_note = (f"  (⚠ lfp_timestamps.npy implies {int(fs)} Hz = the raw "
-                         f"rate, not the LFP rate — keeping {self.fs_var.get()} Hz. "
+                         f"rate, not the LFP rate — keeping {self.fs_edit.text()} Hz. "
                          f"Re-export the LFP or set the rate manually.)")
         elif fs:
-            self.fs_var.set(str(int(fs)))
+            self.fs_edit.setText(str(int(fs)))
             rate_note = f"  (sampling rate auto-set to {int(fs)} Hz)"
         try:
-            fs_val = float(self.fs_var.get())
+            fs_val = float(self.fs_edit.text())
         except ValueError:
             fs_val = fs or 1000.0
         dur = n_samples / fs_val if fs_val else 0
         layout = "lfp_data.npy" if src["kind"] == "matrix" else "channels_npy/"
         rng = f"{chans[0]}-{chans[-1]}" if chans else "none"
-        self.info_label.config(
-            text=f"{len(chans)} channels ({rng}) via {layout}, {n_samples:,} samples, "
-                 f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
+        self.info_label.setText(
+            f"{len(chans)} channels ({rng}) via {layout}, {n_samples:,} samples, "
+            f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
     def _sel_lfp(self):
-        folder = filedialog.askdirectory(title="Select LFP Output Folder",
-                                         parent=self.root)
+        folder = QFileDialog.getExistingDirectory(self, "Select LFP Output Folder")
         if not folder:
             return
         self.lfp_folder = folder
-        self.lfp_var.set(folder)
+        self.lfp_edit.setText(folder)
         self.lfp_source = find_lfp_source(folder)
         if self.lfp_source is None:
             self._set_status("Warning: no lfp_data.npy or channels_npy/ found here.",
                              "#cc6600")
-            self.info_label.config(text="")
+            self.info_label.setText("")
         else:
             self._set_status("Folder loaded. Enter channels, then Launch.", "#000000")
             self._show_recording_info(folder)
@@ -225,7 +236,7 @@ class SetupGUI:
             from processing import output_prefix
             pfx = output_prefix(folder)
             if pfx:
-                self.name_var.set(pfx.rstrip("_"))
+                self.name_edit.setText(pfx.rstrip("_"))
                 self._set_status(f"Folder loaded. Session: {pfx.rstrip('_')}. "
                                  f"Enter channels, then Launch.", "#000000")
 
@@ -234,34 +245,33 @@ class SetupGUI:
             p = find_output(folder, cand)          # prefixed (rat_sessiondate_) or not
             if p is not None:
                 self.emg_file = str(p)
-                self.emg_var.set(str(p))
-                self.emg_auto.config(text=f"Auto-detected: {os.path.basename(p)}",
-                                     fg="#007000")
+                self.emg_edit.setText(str(p))
+                self.emg_auto.setText(f"Auto-detected: {os.path.basename(p)}")
+                self.emg_auto.setStyleSheet("color:#007000;")
                 break
         if not self.emg_file:
-            self.emg_auto.config(text="No EMG file auto-detected - browse manually.",
-                                 fg="#cc6600")
+            self.emg_auto.setText("No EMG file auto-detected - browse manually.")
+            self.emg_auto.setStyleSheet("color:#cc6600;")
         if not self.out_folder:
             self.out_folder = folder
-            self.out_var.set(folder)
+            self.out_edit.setText(folder)
 
     def _sel_emg(self):
         start = self.lfp_folder or os.getcwd()
-        f = filedialog.askopenfilename(title="Select Motion / EMG File",
-                                       initialdir=start, parent=self.root,
-                                       filetypes=[("NumPy", "*.npy")])
+        f, _ = QFileDialog.getOpenFileName(self, "Select Motion / EMG File", start,
+                                           "NumPy (*.npy)")
         if not f:
             return
         self.emg_file = f
-        self.emg_var.set(f)
-        self.emg_auto.config(text="Motion file set manually.", fg="#000099")
+        self.emg_edit.setText(f)
+        self.emg_auto.setText("Motion file set manually.")
+        self.emg_auto.setStyleSheet("color:#000099;")
 
     def _sel_out(self):
-        folder = filedialog.askdirectory(title="Select Output / Save Folder",
-                                         parent=self.root)
+        folder = QFileDialog.getExistingDirectory(self, "Select Output / Save Folder")
         if folder:
             self.out_folder = folder
-            self.out_var.set(folder)
+            self.out_edit.setText(folder)
 
     # ------------------------------------------------------------------ launch
     def _launch(self):
@@ -272,15 +282,15 @@ class SetupGUI:
         if not self.out_folder:
             return self._set_status("Error: select an output folder.", "#cc0000")
         try:
-            eeg_fs = float(self.fs_var.get())
+            eeg_fs = float(self.fs_edit.text())
             assert eeg_fs > 0
         except (ValueError, AssertionError):
             return self._set_status("Error: sampling rate must be positive.", "#cc0000")
 
         chs = []
-        for k, v in enumerate(self.ch_vars):
+        for k, e in enumerate(self.ch_edits):
             try:
-                val = int(v.get().strip())
+                val = int(e.text().strip())
                 assert val >= 1
             except (ValueError, AssertionError):
                 return self._set_status(f"Error: Ch {k + 1} must be a whole number >= 1.",
@@ -289,7 +299,7 @@ class SetupGUI:
         if len(set(chs)) < 3:
             return self._set_status("Error: all 3 channels must differ.", "#cc0000")
 
-        base = self.name_var.get().strip() or "session"
+        base = self.name_edit.text().strip() or "session"
         # Prefix saved files (-states.mat, cache) with the session's rat_sessiondate_
         # already on the LFP folder, so every generated file shares one naming.
         # The Name field is auto-filled with the detected session token on folder
@@ -313,7 +323,7 @@ class SetupGUI:
 
         cpath = cache_path(self.out_folder, base)
         cached = None
-        if not self.recompute_var.get() and os.path.isfile(cpath):
+        if not self.recompute_chk.isChecked() and os.path.isfile(cpath):
             self._set_status("Loading cached spectrograms ...", "#0000aa")
             cached = load_cache(cpath, chs, eeg_fs)
 
@@ -340,7 +350,7 @@ class SetupGUI:
                 fos.append(fo)
                 raw_eeg.append(cleaned)
 
-            mode = MOTION_MODES.get(self.motion_mode_var.get(), "accelerometer")
+            mode = MOTION_MODES.get(self.motion_combo.currentText(), "accelerometer")
             self._set_status(f"Loading + processing motion ({mode}) ...", "#0000aa")
             motion_raw = np.load(self.emg_file, mmap_mode="r")
             motion = process_motion(motion_raw, raw_eeg[0].size, eeg_fs, mode=mode)
@@ -362,9 +372,9 @@ class SetupGUI:
                              out_folder=self.out_folder, chs=chs,
                              auto_states=auto_states, auto_states_ts=auto_ts,
                              overlays=overlays)
-        self.root.withdraw()
+        self.hide()
         editor.show()
-        self.root.deiconify()
+        self.show()
         self._set_status("State editor closed. Results saved to output folder.", "#006600")
 
     def _buzsaki_labels(self, chs):
@@ -374,20 +384,20 @@ class SetupGUI:
         take effect) and overwrites buzsaki_states.npz. Only falls back to a saved
         npz if the recompute fails.
         """
-        if not self.buzsaki_var.get():
+        if not self.buzsaki_chk.isChecked():
             return None, None
         import buzsaki_score as bz
 
-        def _f(var, default):
+        def _f(edit, default):
             try:
-                return float(var.get())
-            except (ValueError, tk.TclError):
+                return float(edit.text())
+            except ValueError:
                 return default
-        kw = dict(sw_factor=_f(self.swf_var, 1.0),
-                  th_factor=_f(self.thf_var, bz.TH_THRESH_FACTOR),
-                  emg_factor=_f(self.emgf_var, 1.0),
-                  drowsy_frac=_f(self.drowsy_var, bz.DROWSY_FRAC),
-                  min_secs=_f(self.minsec_var, 10.0))
+        kw = dict(sw_factor=_f(self.swf_edit, 1.0),
+                  th_factor=_f(self.thf_edit, bz.TH_THRESH_FACTOR),
+                  emg_factor=_f(self.emgf_edit, 1.0),
+                  drowsy_frac=_f(self.drowsy_edit, bz.DROWSY_FRAC),
+                  min_secs=_f(self.minsec_edit, 10.0))
         try:
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
             res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0], **kw)
@@ -441,12 +451,14 @@ class SetupGUI:
                 print(f"Warning: could not load theta/delta overlay: {exc}")
         return overlays
 
-    def run(self):
-        self.root.mainloop()
-
 
 def main():
-    SetupGUI().run()
+    app = QApplication.instance() or QApplication(sys.argv)
+    gui = SetupGUI()
+    gui.show()
+    gui.raise_()
+    gui.activateWindow()
+    app.exec()
 
 
 if __name__ == "__main__":
