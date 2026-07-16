@@ -342,8 +342,8 @@ class SetupGUI(QMainWindow):
         self.thr_grid.setVerticalSpacing(4)
         self.swf_edit = QLineEdit("1.0")
         self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
-        self.emgf_edit = QLineEdit("2.5")
-        self.drowsy_edit = QLineEdit(str(_bz.DROWSY_FRAC))
+        self.emgf_edit = QLineEdit("2.2")
+        self.drowsy_edit = QLineEdit("0.8")
         self.minsec_edit = QLineEdit("10")
         fields = [("SW×  (NREM)", self.swf_edit, "Slow-wave threshold multiplier. ↓ = more NREM."),
                   ("θ×  (REM)", self.thf_edit, "Theta threshold multiplier. ↓ = more REM."),

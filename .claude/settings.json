@@ -6,7 +6,8 @@
       "Bash(python3 -c ' *)",
       "Bash(python3 -c \"import objc; from AppKit import NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow, NSVisualEffectStateActive; print\\('pyobjc + AppKit OK'\\); print\\('NSVisualEffectView:', NSVisualEffectView\\)\")",
       "Bash(python3 -c \"import py_compile; [py_compile.compile\\(f,doraise=True\\) for f in \\('setup_gui.py','state_editor.py'\\)]; print\\('compile clean'\\)\")",
-      "Bash(MPLBACKEND=Agg python3 -c ' *)"
+      "Bash(MPLBACKEND=Agg python3 -c ' *)",
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\('setup_gui.py',doraise=True\\); print\\('compile clean'\\)\")"
     ]
   }
 }
