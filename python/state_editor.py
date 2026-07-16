@@ -16,19 +16,23 @@ import os
 import numpy as np
 import matplotlib
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import Slider
+from matplotlib.ticker import FuncFormatter
 from scipy.io import loadmat, savemat
 from scipy.signal.windows import hann
 
 from processing import matlab_round
+from mac_vibrancy import apply_vibrancy
 
 # The editor window is Qt (PyQt6). Importing Qt needs no running QApplication,
 # so this is safe even in headless tests (which set MPLBACKEND=Agg and never
 # build a window — see _setup_backend).
 try:
     from PyQt6.QtCore import Qt, QEventLoop
-    from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
+    from PyQt6.QtGui import QAction
+    from PyQt6.QtWidgets import (QApplication, QMainWindow, QMessageBox,
+                                 QToolBar, QFileDialog, QSlider, QComboBox,
+                                 QWidget as _QWidget, QSizePolicy as _QSizePolicy,
+                                 QPushButton as _QPushButton, QLabel as _QLabel)
     _HAVE_QT = True
 except Exception:                                   # pragma: no cover
     _HAVE_QT = False
@@ -53,14 +57,34 @@ PAN_FRAC = 0.15       # fraction of the window moved by arrow keys
 MIN_VIEW_WINDOW = 10.0  # smallest main-view window (s)
 MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span >= 10 s
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
+ARROW_STEP = 1        # bins the time cursor moves per ← → press (1 bin = 1 s)
+EMG_SENS = 0.8        # EMG 1/0-band threshold multiplier (<1 = more sensitive)
+_VIBRANCY = bool(os.environ.get("HM_VIBRANCY"))   # opt-in macOS behind-window blur
+
+# Apple-style chrome for the editor's Qt toolbars.
+_TB_STYLE = (
+    "QToolBar{background:rgba(246,247,250,70%); border:none;"
+    " border-bottom:1px solid rgba(60,60,67,10%); padding:6px 10px; spacing:3px;}"
+    "QToolBar::separator{background:rgba(60,60,67,14%); width:1px; margin:4px 6px;}"
+    "QToolBar QLabel{color:#55555A; font-size:12px; background:transparent;}"
+    "QToolButton{padding:5px 12px; border-radius:7px; font-size:13px; color:#1D1D1F;}"
+    "QToolButton:hover{background:rgba(0,0,0,7%);}"
+    "QToolButton:pressed{background:rgba(0,0,0,12%);}")
+_SLIDER_STYLE = (
+    "QSlider::groove:horizontal{height:4px; background:#D8D8DC; border-radius:2px;}"
+    "QSlider::sub-page:horizontal{background:#007AFF; border-radius:2px;}"
+    "QSlider::add-page:horizontal{background:#D8D8DC; border-radius:2px;}"
+    "QSlider::handle:horizontal{width:16px; height:16px; margin:-6px 0; border-radius:8px;"
+    " background:#FFFFFF; border:1px solid #C7C7CC;}"
+    "QSlider::handle:horizontal:hover{border:1px solid #A9A9AF;}")
 
 HELP_LINES = [
     ("1-5", "arm a state (then Space Space to score an epoch)"),
-    ("← →", "move the time cursor"),
+    ("← →", "move the time cursor (1 s per press)"),
     ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
     ("0", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
-    ("click", "move cursor here (or set a bound when armed)"),
+    ("click", "move the time cursor here (never scores)"),
     ("Shift+← →", "pan the window left / right"),
     ("Home / End", "jump to start / end"),
     ("scroll", "zoom in / out around the cursor"),
@@ -79,6 +103,15 @@ HELP_LINES = [
 ]
 
 EVENT_COLOR = "magenta"
+
+
+def _fmt_hms(x, _pos=None):
+    """Format a time in seconds as h:mm:ss (or mm:ss under an hour) for the main
+    time axis, so long overnight recordings read in hours at a glance."""
+    x = max(0.0, float(x))
+    h, rem = divmod(int(round(x)), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 if _HAVE_QT:
@@ -160,6 +193,7 @@ class StateEditor:
         # movable time cursor (← → step it, space confirms epoch bounds)
         self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
         self.cursor_time = float((self.lims[0] + self.lims[1]) / 2)
+        self._slider_guard = False
 
         # --- event marking state --------------------------------------------
         self.events = []            # list of [event_num, time_s]
@@ -268,11 +302,114 @@ class StateEditor:
         else:
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             self.win = _EditorWindow(self)
+            win_bg = "transparent" if _VIBRANCY else (
+                "qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+                " stop:0 #F2F5FB, stop:1 #F6F0F5)")
+            self.win.setStyleSheet(f"QMainWindow{{background:{win_bg};}}")
             canvas = FigureCanvasQTAgg(self.fig)    # sets self.fig.canvas
             self.win.setCentralWidget(canvas)
             self.win.resize(1500, 900)
             canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.canvas = self.fig.canvas
+            self._build_toolbar()
+            return
         self.canvas = self.fig.canvas
+
+    def _build_toolbar(self):
+        """A slim toolbar of the most-used actions, mirroring the keyboard
+        shortcuts. Each action re-focuses the canvas so the single-key shortcuts
+        keep working afterwards."""
+        tb = QToolBar("Scoring", self.win)
+        tb.setMovable(False)
+        tb.setStyleSheet(_TB_STYLE)
+        self.win.addToolBar(tb)
+
+        def add(text, fn, tip):
+            a = QAction(text, self.win)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda: (fn(), self.canvas.setFocus()))
+            tb.addAction(a)
+
+        add("💾  Save .npy", self.save_states_npz, "Save scoring as NumPy .npz")
+        add("💾  Save .mat", self.save_states, "Save scoring as MATLAB -states.mat  (s)")
+        add("📂  Load", self.load_states, "Load a saved .npz / .mat scoring  (l)")
+        tb.addSeparator()
+        add("↺  Reset view", lambda: self._set_xlim(*self.lims), "Reset time axis to full extent  (r)")
+        add("⟲  Undo", self._undo, "Undo last state change  (u)")
+        tb.addSeparator()
+        add("❔  Help", self._toggle_help, "Toggle the keyboard/mouse help overlay  (h)")
+
+        hint = _QLabel("  then Space Space to mark an epoch  ·  press h for help  ")
+        hint.setStyleSheet("color:#7a8189; font-size:12px;")
+        tb.addWidget(hint)
+        # push the auto↔manual agreement readout to the far right of the toolbar
+        spacer = _QWidget()
+        spacer.setSizePolicy(_QSizePolicy.Policy.Expanding, _QSizePolicy.Policy.Preferred)
+        spacer.setStyleSheet("background:transparent;")
+        tb.addWidget(spacer)
+        self.match_lbl = _QLabel("")
+        self.match_lbl.setToolTip(
+            "Agreement between your manual scoring and the auto (Buzsáki) labels over "
+            "the bins you've scored.\nκ = Cohen's kappa (chance-corrected): "
+            "<0 poor · .2–.4 fair · .4–.6 moderate · .6–.8 substantial · >.8 near-perfect")
+        self.match_lbl.setStyleSheet("color:#1D1D1F; font-size:12px; font-weight:600;"
+                                     " padding-right:10px;")
+        tb.addWidget(self.match_lbl)
+        self.win.statusBar().setStyleSheet("color:#5a6069;")
+        self.win.statusBar().showMessage("Ready — no unsaved changes")
+
+        # second row: colour-coded state-arm toggle buttons (click to arm, click
+        # again to un-arm). They stay in sync with the 0–5 / c keyboard shortcuts.
+        states_tb = QToolBar("States", self.win)
+        states_tb.setMovable(False)
+        states_tb.setStyleSheet(_TB_STYLE + "QToolBar{spacing:6px;}")
+        self.win.addToolBarBreak()
+        self.win.addToolBar(states_tb)
+        arm_lbl = _QLabel("  Arm state: ")
+        arm_lbl.setStyleSheet("color:#55555A; font-size:12px; font-weight:600;")
+        states_tb.addWidget(arm_lbl)
+        labels = {0: "erase", 1: "awake", 2: "light", 3: "NREM",
+                  4: "interm", 5: "REM"}
+        self._state_btns = {}
+        for s in (1, 2, 3, 4, 5, 0):
+            r, g, b = (STATE_COLORS[s] * 255).astype(int)
+            fg = "#ffffff" if (0.299 * r + 0.587 * g + 0.114 * b) < 140 else "#111111"
+            btn = _QPushButton(f"{s}  {labels[s]}")
+            btn.setCheckable(True)
+            btn.setToolTip(f"Arm state {s} ({STATE_NAMES[s]}) — click again to un-arm  (key {s})")
+            btn.setStyleSheet(
+                f"QPushButton{{background:rgb({r},{g},{b}); color:{fg};"
+                f" border:1px solid rgba(0,0,0,0.12); border-radius:8px;"
+                f" padding:6px 13px; font-size:12px;}}"
+                f"QPushButton:checked{{border:2.5px solid #007AFF; font-weight:700;}}")
+            btn.clicked.connect(lambda _checked, st=s: self._arm_state_toggle(st))
+            states_tb.addWidget(btn)
+            self._state_btns[s] = btn
+
+        # live stats readout, to the right of the state buttons (replaces the old
+        # right-margin legend + info panel).
+        states_tb.addSeparator()
+        self.stats_lbl = _QLabel("")
+        self.stats_lbl.setStyleSheet("color:#1D1D1F; font-size:12px; padding-left:8px;")
+        states_tb.addWidget(self.stats_lbl)
+
+    def _arm_state_toggle(self, s):
+        """Toggle-arm state ``s`` from a button: arm it, or un-arm if already
+        armed. Mirrors pressing key ``s`` (then ``c`` to cancel)."""
+        self.current_state = None if self.current_state == s else s
+        self.event_mode = None
+        self.pending_bound = None
+        self._clear_pending_line()
+        self._set_title()
+        self.canvas.setFocus()
+
+    def _sync_state_buttons(self):
+        """Reflect the armed state on the buttons (keeps keyboard + buttons in
+        sync)."""
+        if not hasattr(self, "_state_btns"):
+            return
+        for s, btn in self._state_btns.items():
+            btn.setChecked(self.current_state == s)
 
     def _set_window_title(self, text):
         if getattr(self, "win", None) is not None:
@@ -297,7 +434,7 @@ class StateEditor:
         self._set_window_title(f"Sleep scoring — {self.base_name}")
 
         n = self.n_ch
-        left, width = 0.065, 0.80
+        left, width = 0.065, 0.905
         # vertical layout: (auto bar) / state bar / spectrograms / motion / LFP traces
         has_auto = self.auto_states is not None
         if has_auto:
@@ -313,12 +450,11 @@ class StateEditor:
         for i in range(n):
             y = spec_top - (i + 1) * spec_h
             self.ax_spec.append(self.fig.add_axes([left, y, width, spec_h - 0.005]))
-        self.ax_motion = self.fig.add_axes([left, 0.235, width, 0.07])
-        # compact LFP stack anchored just below motion, leaving room at the very
-        # bottom (< ~0.09) for the window/position sliders.
-        eeg_h = 0.04
-        eeg_top = 0.23 - eeg_h
-        self.ax_eeg = [self.fig.add_axes([left, eeg_top - i * (eeg_h + 0.006),
+        self.ax_motion = self.fig.add_axes([left, 0.225, width, 0.08])
+        # LFP stack fills the space freed by moving the sliders up to the toolbar.
+        eeg_h = 0.05
+        eeg_top = 0.16
+        self.ax_eeg = [self.fig.add_axes([left, eeg_top - i * (eeg_h + 0.012),
                                           width, eeg_h]) for i in range(n)]
 
         self._draw_state_bar()
@@ -339,22 +475,71 @@ class StateEditor:
             ax.set_xlim(self.lims)
             if i != n - 1:
                 ax.set_xticklabels([])
+            else:
+                # main time axis: label ticks as h:mm:ss (long recordings read
+                # in hours). The underlying coordinates stay in seconds.
+                ax.xaxis.set_major_formatter(FuncFormatter(_fmt_hms))
             self.cursor_lines.append(ax.axvline(mid, color="w", ls="--", lw=0.8))
 
-        traces = [("Motion", self.motion, "#000000")] + [
-            (label, a, c) for (label, a), c in zip(
-                self.overlays, ["#c0392b", "#2980b9", "#16a085", "#8e44ad"])]
-        for label, a, c in traces:
-            self.ax_motion.plot(self.to, a, "-", color=c, lw=0.6, label=label)
-        allv = np.concatenate([a[np.isfinite(a)] for _, a, _ in traces
-                               if np.isfinite(a).any()]) if traces else np.array([0.0])
-        if allv.size:
-            self.ax_motion.set_ylim(np.percentile(allv, 1), np.percentile(allv, 99))
-        self.ax_motion.set_ylabel("Motion · EMG\n" + r"$\theta/\delta$  (z)",
-                                  fontsize=8)
-        if self.overlays:
-            self.ax_motion.legend(loc="upper right", fontsize=6, ncol=len(traces),
-                                  framealpha=0.4, handlelength=1.0, columnspacing=1.0)
+        # remember the auto colour limits, display band and cmap for the toolbar
+        # controls (frequency-band / contrast sliders + colormap picker).
+        self._spec_clim0 = [img.get_clim() for img in self.spec_imgs]
+        self._fmax = MAX_FREQ
+        self._contrast = 1.0
+
+        # Motion / EMG / theta-delta as stacked "ridgeline" lanes, each thresholded at
+        # its bimodal-histogram dip and shown as a bold 1/0 band — filled above
+        # threshold (=1), blank below (=0) — plus a faint trace + dotted threshold line.
+        #   * Motion -> smoothed |Δ| (movement onsets stand out; drift removed).
+        #   * EMG / theta-delta -> LEVEL (already ~0 when quiet; |Δ| would wrongly
+        #     zero out sustained tonic EMG and flat high-theta REM).
+        # Colour-blind-safe colours (Okabe–Ito): Motion & EMG high = wake; theta/delta
+        # high (others low) = REM; all low = NREM.
+        import buzsaki_score as _bz
+        from scipy.ndimage import uniform_filter1d
+        MOTION_PALETTE = ["#009e73", "#d55e00", "#0072b2", "#cc79a7"]
+        traces = [("Motion", self.motion)] + list(self.overlays)
+        yticks = []
+        self.motion_thresholds = {}
+        for i, (label, a) in enumerate(traces):
+            color = MOTION_PALETTE[i % len(MOTION_PALETTE)]
+            base = float(i)
+            sig = np.asarray(a, dtype=float)
+            metric = (uniform_filter1d(np.abs(np.diff(sig, prepend=sig[:1])),
+                                       size=7, mode="nearest")
+                      if label.lower() == "motion" else sig)
+            finite = metric[np.isfinite(metric)]
+            lo, hi = (np.percentile(finite, 1), np.percentile(finite, 99)) \
+                if finite.size else (0.0, 1.0)
+            span_i = (hi - lo) or 1.0
+            norm = np.clip((metric - lo) / span_i, 0.0, 1.0) * 0.88
+            default = float(np.median(finite)) if finite.size else np.inf
+            thr = (_bz.bimodal_threshold(finite, default=default)
+                   if finite.size else np.inf)
+            # EMG: same bimodal algorithm, just a bit more sensitive (× EMG_SENS < 1).
+            if label.lower() == "emg":
+                thr *= EMG_SENS
+            self.motion_thresholds[label] = float(thr)
+            on = metric > thr
+            thr_y = base + float(np.clip((thr - lo) / span_i, 0.0, 1.0)) * 0.88
+            self.ax_motion.axhline(base, color="#e2e5e9", lw=0.5, zorder=1)
+            # 1/0 band: lightly filled where the signal is above its threshold
+            self.ax_motion.fill_between(self.to, base, base + 0.88, where=on,
+                                        step="mid", color=color, alpha=0.3,
+                                        linewidth=0, zorder=2)
+            # continuous trace + dotted threshold line for reference
+            self.ax_motion.plot(self.to, base + norm, color=color, lw=0.6,
+                                alpha=0.55, zorder=3)
+            self.ax_motion.axhline(thr_y, color=color, ls=":", lw=0.7, alpha=0.9,
+                                   zorder=4)
+            yticks.append(base + 0.44)
+        self.ax_motion.set_ylim(0, len(traces))
+        self.ax_motion.set_yticks(yticks)
+        self.ax_motion.set_yticklabels([lbl for lbl, _ in traces], fontsize=7.5)
+        for i, tl in enumerate(self.ax_motion.get_yticklabels()):
+            tl.set_color(MOTION_PALETTE[i % len(MOTION_PALETTE)])
+            tl.set_fontweight("bold")
+        self.ax_motion.tick_params(axis="y", length=0)
         self.ax_motion.set_xlim(self.lims)
         self.ax_motion.set_xticklabels([])
         self.cursor_lines.append(self.ax_motion.axvline(mid, color="k", ls="--", lw=0.8))
@@ -379,36 +564,130 @@ class StateEditor:
         self.ax_eeg[-1].set_xlabel("Time (s)")
 
         self._update_eeg(mid)
-        self._build_sliders()
+        if getattr(self, "win", None) is not None:
+            self._build_slider_toolbar()
         self._set_title()
 
-    def _build_sliders(self):
-        """Bottom sliders: LEFT = main time view (window size + sliding position);
-        RIGHT = raw LFP trace (window size + amplitude gain)."""
+    def _build_slider_toolbar(self):
+        """View controls as a top Qt toolbar row: main time window + position,
+        and the raw-LFP window + gain. Replaces the old bottom matplotlib sliders."""
         span = self.lims[1] - self.lims[0]
-        self._win_min = min(10.0, span)
+        self._win_min = min(10.0, span) if span > 0 else 1.0
+        self._sc_win = self._sc_pos = 1.0        # 1 unit = 1 s
+        self._sc_raw = self._sc_gain = 10.0      # 1 unit = 0.1
+
+        tb = QToolBar("View", self.win)
+        tb.setMovable(False)
+        tb.setStyleSheet(_TB_STYLE + _SLIDER_STYLE)
+        self.win.addToolBarBreak()
+        self.win.addToolBar(tb)
+
+        self._slider_guard = True                # muffle the initial setValue events
+        self.win_slider, self._lbl_win = self._add_qslider(
+            tb, "Window", self._win_min, span, span, self._sc_win, "%.0f s",
+            self._on_win_slider, 180)
+        self.pos_slider, self._lbl_pos = self._add_qslider(
+            tb, "Position", self.lims[0], self.lims[1], self.lims[0], self._sc_pos,
+            "%.0f s", self._on_pos_slider, 180)
+        tb.addSeparator()
+        self.rawwin_slider, self._lbl_raw = self._add_qslider(
+            tb, "Raw win", 0.5, min(30.0, span) if span > 0 else 30.0, self.eeg_show,
+            self._sc_raw, "%.1f s", self._on_rawwin_slider, 120)
+        self.rawgain_slider, self._lbl_gain = self._add_qslider(
+            tb, "Raw gain", 0.2, 10.0, self.eeg_scale, self._sc_gain, "%.1f",
+            self._on_rawgain_slider, 120)
+
+        # second row — spectrogram display: frequency band + colormap depth + cmap
+        tb2 = QToolBar("Display", self.win)
+        tb2.setMovable(False)
+        tb2.setStyleSheet(_TB_STYLE + _SLIDER_STYLE)
+        self.win.addToolBarBreak()
+        self.win.addToolBar(tb2)
+        fmax_avail = float(np.nanmax(self.fo)) if self.fo.size else 200.0
+        self.freq_slider, self._lbl_freq = self._add_qslider(
+            tb2, "Freq band", 10.0, fmax_avail, self._fmax, 1.0, "%.0f Hz",
+            self._set_freq_band, 200)
+        self.contrast_slider, self._lbl_contrast = self._add_qslider(
+            tb2, "Depth", 0.5, 3.0, self._contrast, 10.0, "%.1f×",
+            self._on_contrast, 160)
+        tb2.addSeparator()
+        cap = _QLabel("  Colormap ")
+        cap.setStyleSheet("font-weight:600; padding-left:6px;")
+        tb2.addWidget(cap)
+        cmap_combo = QComboBox()
+        cmap_combo.addItems(["turbo", "jet", "cool"])
+        cmap_combo.setStyleSheet(
+            "QComboBox{background:#FFFFFF; border:1px solid #D1D1D6; border-radius:7px;"
+            " padding:3px 10px; font-size:12px; min-width:72px;}"
+            "QComboBox::drop-down{border:none; width:18px;}"
+            "QComboBox QAbstractItemView{background:#FFFFFF; border:1px solid #E4E4E8;"
+            " selection-background-color:#007AFF; selection-color:#fff; outline:none;}")
+        cmap_combo.currentTextChanged.connect(lambda name: (self._on_cmap(name),
+                                                            self.canvas.setFocus()))
+        tb2.addWidget(cmap_combo)
         self._slider_guard = False
-        # left column — main spectrogram/state time view
-        ax_win = self.fig.add_axes([0.11, 0.05, 0.30, 0.016])
-        ax_pos = self.fig.add_axes([0.11, 0.02, 0.30, 0.016])
-        self.win_slider = Slider(ax_win, "Window (s)", self._win_min, span,
-                                 valinit=span, valfmt="%.0f")
-        self.pos_slider = Slider(ax_pos, "Position (s)", self.lims[0], self.lims[1],
-                                 valinit=self.lims[0], valfmt="%.0f")
-        self.win_slider.on_changed(self._on_win_slider)
-        self.pos_slider.on_changed(self._on_pos_slider)
-        # right column — raw LFP trace controls
-        ax_rw = self.fig.add_axes([0.60, 0.05, 0.22, 0.016])
-        ax_rg = self.fig.add_axes([0.60, 0.02, 0.22, 0.016])
-        self.rawwin_slider = Slider(ax_rw, "Raw win (s)", 0.5, min(30.0, span),
-                                    valinit=self.eeg_show, valfmt="%.1f")
-        self.rawgain_slider = Slider(ax_rg, "Raw gain", 0.2, 10.0,
-                                     valinit=self.eeg_scale, valfmt="%.1f")
-        self.rawwin_slider.on_changed(self._on_rawwin_slider)
-        self.rawgain_slider.on_changed(self._on_rawgain_slider)
-        for s in (self.win_slider, self.pos_slider, self.rawwin_slider,
-                  self.rawgain_slider):
-            s.label.set_fontsize(7)
+
+    def _add_qslider(self, tb, text, lo, hi, init, scale, fmt, fn, width):
+        """Add a captioned horizontal QSlider (+ live value label) to a toolbar.
+        Values are scaled to integers for QSlider and mapped back to floats."""
+        cap = _QLabel(f"  {text} ")
+        cap.setStyleSheet("font-weight:600; padding-left:6px;")
+        tb.addWidget(cap)
+        sld = QSlider(Qt.Orientation.Horizontal)
+        sld.setFixedWidth(width)
+        imin, imax = int(round(lo * scale)), int(round(hi * scale))
+        sld.setMinimum(imin)
+        sld.setMaximum(max(imax, imin + 1))
+        sld.setValue(int(round(min(max(init, lo), hi) * scale)))
+        vlbl = _QLabel(fmt % init)
+        vlbl.setStyleSheet("color:#333; min-width:46px;")
+        sld.valueChanged.connect(
+            lambda iv, s=scale, v=vlbl, f=fmt, g=fn: self._on_qslider(iv, s, v, f, g))
+        tb.addWidget(sld)
+        tb.addWidget(vlbl)
+        return sld, vlbl
+
+    def _on_qslider(self, iv, scale, vlbl, fmt, fn):
+        val = iv / scale
+        vlbl.setText(fmt % val)
+        if self._slider_guard:
+            return
+        fn(val)
+
+    def _set_qslider(self, slider, scale, value, vlbl, fmt):
+        iv = int(round(value * scale))
+        iv = max(slider.minimum(), min(slider.maximum(), iv))
+        slider.setValue(iv)
+        vlbl.setText(fmt % value)
+
+    # -- spectrogram display controls -------------------------------------
+    def _set_freq_band(self, fmax):
+        """Show the spectrograms up to ``fmax`` Hz (re-slices the display data)."""
+        mask = self.fo <= fmax
+        if int(mask.sum()) < 2:
+            return
+        self._fmax = float(fmax)
+        ylo, yhi = float(self.fo[mask][0]), float(self.fo[mask][-1])
+        for i, img in enumerate(self.spec_imgs):
+            img.set_data(self.spec_disp[i][mask, :])
+            img.set_extent([self.to[0], self.to[-1], ylo, yhi])
+            self.ax_spec[i].set_ylim(ylo, yhi)
+        self.fig.canvas.draw_idle()
+
+    def _on_contrast(self, k):
+        """Colormap 'depth': compress/expand the colour limits about their centre
+        (higher = more contrast / deeper colours)."""
+        self._contrast = max(float(k), 1e-3)
+        for img, (v0, v1) in zip(self.spec_imgs, self._spec_clim0):
+            c = (v0 + v1) / 2.0
+            half = (v1 - v0) / 2.0 / self._contrast
+            img.set_clim(c - half, c + half)
+        self.fig.canvas.draw_idle()
+
+    def _on_cmap(self, name):
+        for img in self.spec_imgs:
+            img.set_cmap(name)
+        self.fig.canvas.draw_idle()
 
     def _raw_centre(self):
         return float(np.mean(self.ax_eeg[0].get_xlim()))
@@ -449,37 +728,16 @@ class StateEditor:
             return
         self._slider_guard = True
         try:
-            self.win_slider.set_val(np.clip(hi - lo, self.win_slider.valmin,
-                                            self.win_slider.valmax))
-            self.pos_slider.set_val(np.clip(lo, self.pos_slider.valmin,
-                                            self.pos_slider.valmax))
+            self._set_qslider(self.win_slider, self._sc_win, hi - lo, self._lbl_win, "%.0f s")
+            self._set_qslider(self.pos_slider, self._sc_pos, lo, self._lbl_pos, "%.0f s")
         finally:
             self._slider_guard = False
 
     # --------------------------------------------------------------- side panel
     def _build_side_panel(self):
-        """Right-margin legend + live info + (hidden) help overlay."""
-        ax = self.fig.add_axes([0.865, 0.34, 0.125, 0.59])
-        ax.axis("off")
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.text(0.0, 0.99, "States", fontsize=11, fontweight="bold", va="top")
-        for i, s in enumerate([1, 2, 3, 4, 5, 0]):
-            y = 0.92 - i * 0.058
-            ax.add_patch(Rectangle((0.0, y - 0.035), 0.16, 0.045,
-                                   facecolor=STATE_COLORS[s],
-                                   edgecolor="0.4", lw=0.6))
-            ax.text(0.21, y - 0.013, f"{s}  {STATE_NAMES[s]}", fontsize=9, va="center")
-        ax.text(0.0, 0.50, "Press 'h' for help", fontsize=8.5,
-                style="italic", color="0.35", va="top")
-        self.ax_side = ax
-
-        # live info text (armed state, position, coverage)
-        self.info_text = self.fig.text(0.865, 0.30, "", fontsize=9,
-                                       va="top", family="monospace")
-        self._update_info()
-
-        # full-figure help overlay, hidden until toggled
+        """Only the (hidden) full-figure help overlay now lives here — the state
+        legend is replaced by the coloured toolbar buttons, and the live stats by
+        the toolbar readout beside them."""
         lines = ["Keyboard / mouse controls", ""]
         lines += [f"{k:>10}   {d}" for k, d in HELP_LINES]
         self.help_overlay = self.fig.text(
@@ -493,32 +751,23 @@ class StateEditor:
         return scored, self.n_bins
 
     def _update_info(self):
-        centre = np.mean(self.ax_spec[0].get_xlim()) if hasattr(self, "ax_spec") \
-            else self.lims[0]
+        """Refresh the compact live stats shown beside the state buttons."""
+        if not hasattr(self, "stats_lbl"):
+            return
         scored, total = self._coverage()
         pct = 100.0 * scored / total if total else 0.0
         if self.current_state is not None:
-            armed = f"state {self.current_state} ({STATE_NAMES[self.current_state]})"
+            armed = f"{self.current_state} {STATE_NAMES[self.current_state]}"
         elif self.event_mode:
-            armed = f"{self.event_mode} event {self.event_num}"
+            armed = f"{self.event_mode} ev{self.event_num}"
         else:
-            armed = "none"
-        dur = self.lims[1] - self.lims[0]
-        n_ev = len(self.events)
-        n_ev_active = sum(1 for en, _ in self.events if en == self.event_num)
-        lines = [
-            f"armed : {armed}",
-            f"time  : {centre:7.1f}s",
-            f"length: {dur:7.1f}s ({dur/60:.1f}m)",
-            f"scored: {pct:5.1f}%",
-            f"events: {n_ev}  (#{self.event_num}: {n_ev_active})",
-            "",
-            "per-state bins:",
-        ]
-        for s in range(1, 6):
-            c = int(np.count_nonzero(self.states == s))
-            lines.append(f"  {s} {STATE_NAMES[s][:6]:6} {c:6d}")
-        self.info_text.set_text("\n".join(lines))
+            armed = "—"
+        counts = "   ".join(
+            f"{lab} {int(np.count_nonzero(self.states == s))}"
+            for s, lab in ((1, "W"), (2, "L"), (3, "N"), (4, "I"), (5, "R")))
+        self.stats_lbl.setText(
+            f"armed: {armed}      scored {pct:.1f}%      {counts}      "
+            f"{len(self.events)} ev")
 
     def _toggle_help(self):
         self.help_visible = not self.help_visible
@@ -618,9 +867,55 @@ class StateEditor:
             extra = f" - Delete Event {self.event_num} (click near a mark)"
         star = "*" if getattr(self, "dirty", False) else ""
         self._set_window_title(f"States: {self.base_name}{star}{extra}")
-        if hasattr(self, "info_text"):
+        self._sync_state_buttons()
+        self._update_match()
+        self._update_statusbar()
+        if hasattr(self, "stats_lbl"):
             self._update_info()
             self.fig.canvas.draw_idle()
+
+    @staticmethod
+    def _cohens_kappa(a, b):
+        """Cohen's κ between two label vectors — agreement corrected for chance."""
+        a = np.asarray(a)
+        b = np.asarray(b)
+        if a.size == 0:
+            return np.nan
+        po = float(np.mean(a == b))                         # observed agreement
+        labels = np.unique(np.concatenate([a, b]))
+        pe = float(sum(np.mean(a == c) * np.mean(b == c) for c in labels))  # chance
+        if pe >= 1.0:                                       # single shared category
+            return 1.0 if po >= 1.0 else np.nan
+        return (po - pe) / (1.0 - pe)
+
+    def _update_match(self):
+        """Show how well the manual scoring agrees with the auto (Buzsáki) labels,
+        over the bins scored so far — raw % and Cohen's κ — in the toolbar readout."""
+        if not hasattr(self, "match_lbl"):
+            return
+        if self.auto_states is None:
+            self.match_lbl.setText("")
+            return
+        scored = self.states != 0
+        n = int(scored.sum())
+        if n == 0:
+            self.match_lbl.setText("Auto ↔ Manual:  —  ")
+            return
+        m, a = self.states[scored], self.auto_states[scored]
+        agree = float(np.mean(m == a)) * 100.0
+        kappa = self._cohens_kappa(m, a)
+        ktxt = f"κ={kappa:.2f}" if np.isfinite(kappa) else "κ=n/a"
+        self.match_lbl.setText(f"Auto ↔ Manual:  {agree:.0f}%   {ktxt}   (n={n})  ")
+
+    def _update_statusbar(self):
+        """Reflect scored coverage and dirty state in the Qt status bar."""
+        if getattr(self, "win", None) is None:
+            return
+        scored, total = self._coverage()
+        pct = 100.0 * scored / total if total else 0.0
+        flag = "● unsaved changes" if self.dirty else "✓ saved"
+        self.win.statusBar().showMessage(f"{flag}   ·   scored {pct:.1f}%   ·   "
+                                         f"{len(self.events)} event(s)")
 
     def _xlim_get(self):
         return self.ax_spec[0].get_xlim()
@@ -648,7 +943,7 @@ class StateEditor:
         self.cursor_time = float(np.clip(self.cursor_time, lo, hi))
         self._update_eeg(self.cursor_time)
         self._sync_sliders(lo, hi)
-        if hasattr(self, "info_text"):
+        if hasattr(self, "stats_lbl"):
             self._update_info()
         self.fig.canvas.draw_idle()
 
@@ -671,9 +966,9 @@ class StateEditor:
         for ln in self.cursor_lines:
             ln.set_xdata([centre, centre])
 
-    def _move_cursor(self, direction):
-        """Step the time cursor by one bin (← →), scrolling the view to follow."""
-        self.cursor_time = float(np.clip(self.cursor_time + direction * self._dt,
+    def _move_cursor(self, direction, steps=1):
+        """Step the time cursor by ``steps`` bins (← →), scrolling to follow."""
+        self.cursor_time = float(np.clip(self.cursor_time + direction * steps * self._dt,
                                          self.lims[0], self.lims[1]))
         lo, hi = self._xlim_get()
         w = hi - lo
@@ -683,7 +978,7 @@ class StateEditor:
             self._set_xlim(self.cursor_time - w, self.cursor_time)
         else:
             self._update_eeg(self.cursor_time)
-            if hasattr(self, "info_text"):
+            if hasattr(self, "stats_lbl"):
                 self._update_info()
             self.fig.canvas.draw_idle()
 
@@ -738,7 +1033,7 @@ class StateEditor:
         elif k in ("n", "p"):
             self._jump_event(forward=(k == "n"))
         elif k in ("right", "left"):
-            self._move_cursor(1 if k == "right" else -1)
+            self._move_cursor(1 if k == "right" else -1, steps=ARROW_STEP)
         elif k in (" ", "space"):
             self._confirm_boundary()
         elif k in ("shift+right", "shift+left"):    # coarse pan (whole window)
@@ -781,9 +1076,8 @@ class StateEditor:
         if hasattr(self, "rawwin_slider"):     # keep the slider in sync
             self._slider_guard = True
             try:
-                self.rawwin_slider.set_val(np.clip(self.eeg_show,
-                                                   self.rawwin_slider.valmin,
-                                                   self.rawwin_slider.valmax))
+                self._set_qslider(self.rawwin_slider, self._sc_raw, self.eeg_show,
+                                  self._lbl_raw, "%.1f s")
             finally:
                 self._slider_guard = False
         self._update_eeg(np.mean(self.ax_eeg[0].get_xlim()))
@@ -814,31 +1108,23 @@ class StateEditor:
             self._delete_event(event.xdata)
             return
 
-        # a click always moves the time cursor to that spot
+        # A click only moves the time cursor (and re-centres the LFP view).
+        # Epoch boundaries are confirmed with Space only, never by clicking.
         self.cursor_time = float(event.xdata)
-        if self.current_state is None:
-            # browse: centre LFP view on the click
-            self._update_eeg(self.cursor_time)
-            if hasattr(self, "info_text"):
-                self._update_info()
-            self.fig.canvas.draw_idle()
-            return
-
-        # scoring: first click sets a bound, second applies the state
-        if self.pending_bound is None:
-            self.pending_bound = self.cursor_time
-            for ax in self.ax_spec + [self.ax_motion, self.ax_state]:
-                self.pending_line.append(ax.axvline(self.cursor_time, color="r", lw=1.0))
-            self._update_eeg(self.cursor_time)
-            self.fig.canvas.draw_idle()
-        else:
-            self._apply_state(self.pending_bound, self.cursor_time, self.current_state)
-            self.pending_bound = None
-            self._clear_pending_line()
+        self._update_eeg(self.cursor_time)
+        if hasattr(self, "stats_lbl"):
+            self._update_info()
+        self.fig.canvas.draw_idle()
 
     def _clear_pending_line(self):
+        # A pending marker drawn on the state bar is wiped by ax_state.clear() when
+        # the hypnogram redraws, so the artist may already be gone — remove
+        # defensively (newer matplotlib raises instead of ignoring).
         for ln in self.pending_line:
-            ln.remove()
+            try:
+                ln.remove()
+            except (NotImplementedError, ValueError):
+                pass
         self.pending_line = []
         self.fig.canvas.draw_idle()
 
@@ -870,7 +1156,7 @@ class StateEditor:
 
     def _refresh_state_bar(self):
         self._draw_state_bar()
-        if hasattr(self, "info_text"):
+        if hasattr(self, "stats_lbl"):
             self._update_info()
         self.fig.canvas.draw_idle()
 
@@ -913,7 +1199,10 @@ class StateEditor:
     def _refresh_events(self):
         """Redraw all event lines (active number bold, others faint)."""
         for a in self.event_artists:
-            a.remove()
+            try:
+                a.remove()
+            except (NotImplementedError, ValueError):
+                pass
         self.event_artists = []
         # not the state bar: it is cleared/redrawn whenever a state changes
         panels = self.ax_spec + [self.ax_motion]
@@ -929,7 +1218,7 @@ class StateEditor:
                 top_ax.text(tm, 0.98, str(en), transform=top_ax.get_xaxis_transform(),
                             color=EVENT_COLOR, fontsize=8, ha="center", va="top",
                             alpha=alpha, clip_on=True))
-        if hasattr(self, "info_text"):
+        if hasattr(self, "stats_lbl"):
             self._update_info()
         self.fig.canvas.draw_idle()
 
@@ -943,6 +1232,35 @@ class StateEditor:
         savemat(path, {"states": self.states.astype(float).reshape(1, -1),
                        "events": events,
                        "transitions": transitions})
+        print(f"Saved {path}  ({len(self.events)} events)")
+        self.dirty = False
+        self._set_title()
+        return path
+
+    def save_states_npz(self, path=None):
+        """Save the scoring as a NumPy ``.npz`` (states, per-bin timestamps,
+        events and transitions), a companion to the MATLAB ``-states.mat``.
+
+        The ``.npz`` is what the setup GUI reloads to resume a partially scored
+        session. Prompts for a path when run interactively with none given."""
+        if path is None:
+            default = os.path.join(self.out_folder, f"{self.base_name}-states.npz")
+            path = default
+            if _HAVE_QT and self.win is not None:
+                chosen, _ = QFileDialog.getSaveFileName(
+                    self.win, "Save scoring (NumPy)", default, "NumPy (*.npz)")
+                if not chosen:
+                    return None
+                path = chosen
+        if not path.endswith(".npz"):
+            path += ".npz"
+        events = (np.array(self.events, dtype=float) if self.events
+                  else np.zeros((0, 2)))
+        np.savez(path,
+                 states=self.states.astype(int),
+                 timestamps=self.to.astype(float),
+                 events=events,
+                 transitions=self._compute_transitions())
         print(f"Saved {path}  ({len(self.events)} events)")
         self.dirty = False
         self._set_title()
@@ -963,12 +1281,15 @@ class StateEditor:
         return np.array(rows) if rows else np.zeros((0, 3))
 
     def load_states(self, path=None):
+        """Load a previously saved scoring, from either a NumPy ``.npz`` or a
+        MATLAB ``-states.mat`` (chosen by extension). Only applied when the bin
+        count matches this session."""
         if path is None:
             path = os.path.join(self.out_folder, f"{self.base_name}-states.mat")
         if not os.path.isfile(path):
             print(f"No states file at {path}")
             return
-        data = loadmat(path)
+        data = np.load(path) if path.endswith(".npz") else loadmat(path)
         if "states" in data:
             s = np.asarray(data["states"]).ravel().astype(int)
             if s.size == self.n_bins:
@@ -1001,6 +1322,8 @@ class StateEditor:
         self.win.show()
         self.win.raise_()
         self.win.activateWindow()
+        if _VIBRANCY:                     # opt-in real behind-window blur
+            apply_vibrancy(self.win)
         self.canvas.setFocus()
         if owns_app:
             self._app.exec()

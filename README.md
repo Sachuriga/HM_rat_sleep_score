@@ -1,10 +1,10 @@
-# Rat Sleep Scoring Toolkit v1.1
+# Rat Sleep Scoring Toolkit (Python)
 
-MATLAB GUI for manual sleep state scoring of rodent LFP recordings using an interactive state editor.
+A point-and-click PyQt6 toolkit for manual sleep-state scoring of rodent LFP
+recordings. Load LFP saved as NumPy `.npy`, pick channels and a motion/EMG
+signal, and score sleep states in an interactive spectrogram editor.
 
-## Overview
-
-This toolkit provides a point-and-click workflow to load LFP (local field potential) recordings saved as NumPy `.npy` files, select channels and a motion signal, and manually score sleep states using `TheStateEditor`. Sleep states are classified into:
+Sleep states:
 
 | Code | State |
 |------|-------|
@@ -15,96 +15,89 @@ This toolkit provides a point-and-click workflow to load LFP (local field potent
 | 4 | Intermediate |
 | 5 | REM |
 
-The original `TheStateEditor` was written by Dr. Andres Grosmark and Dr. Abdel Rayan. It was modified and generalized by Sachuriga.
+The state editor is a Python reimplementation of `TheStateEditor` (originally by
+Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
 
-## Repository Structure
+## Install
 
-```
-scr/
-├── Sleep_score_HM_neuron.m      # Main GUI — run this to start
-├── TheStateEditor.m             # Interactive GUI for manual sleep scoring
-├── HM_neurons.eegstates.mat     # Example cached spectrogram/channel state file
-└── tool/
-    └── npy-matlab-master/       # Third-party library for reading .npy files in MATLAB
+From the project root, in your Python environment:
 
-LFP_Output/                      # Example data folder
-├── channels_npy/
-│   ├── lfp_nt01_ch01.npy        # Per-tetrode LFP channel files (nt01–nt32)
-│   └── ...
-├── emg_rms.npy                  # EMG RMS (auto-detected as motion signal)
-├── emg_data.npy                 # Raw EMG data
-├── theta_delta_ratio.npy        # Theta/delta ratio (fallback motion signal)
-├── lfp_data.npy                 # Full LFP matrix (all channels)
-└── lfp_timestamps.npy           # Timestamps
+```bash
+pip install -e .
 ```
 
-## Requirements
+This installs the `sleepscore` command. Because it's an editable install, edits
+to the code under `python/` take effect immediately (no reinstall needed).
 
-- MATLAB (any recent version)
-- [`npy-matlab`](https://github.com/kwikteam/npy-matlab) — included under `scr/tool/npy-matlab-master/`
+**Requirements:** Python ≥ 3.9, `PyQt6`, `numpy`, `scipy`, `matplotlib`
+(installed automatically by the command above).
 
 ## Usage
 
-Run the setup GUI from MATLAB:
+From any folder:
 
-```matlab
-cd scr
-Sleep_score_HM_neuron()
+```bash
+sleepscore
 ```
 
-The GUI will open with the following steps:
+The setup GUI opens. Steps:
 
-### 1. Select LFP Output Folder
-Click **Browse** and select the folder containing your LFP data (e.g. `LFP_Output/`). The GUI will automatically scan for channel files named `lfp_ntXX_ch01.npy` and populate the channel list.
+1. **LFP output folder** — Browse to the folder holding your LFP data. It reads
+   either a `channels_npy/` subfolder of per-channel files (`lfp_ntXX_ch01.npy`)
+   or a single `lfp_data.npy` matrix. Channel count, duration and sampling rate
+   are shown, and the session name is auto-filled from the folder's prefix.
+2. **Channels** — enter three distinct 1-based channel numbers to score.
+3. **Motion / EMG file** — auto-detected from the LFP folder (in priority order
+   `motion.npy`, `emg_rms.npy`, `emg_data.npy`, `theta_delta_ratio.npy`), or
+   Browse for any `.npy`.
+4. **Output / save folder** — where results and the spectrogram cache are
+   written. Defaults to the LFP folder.
+5. **Resume from previous scoring** (optional) — auto-detects a saved
+   `*-states.npz` / `*-states.mat` so you can continue an earlier session.
+6. **Parameters** — sampling rate, session name, motion type, and optional
+   Buzsáki auto-scoring with adjustable thresholds.
 
-### 2. Select 3 Channels
-The channel list shows all available channels found in the `channels_npy/` subfolder. Hold **Ctrl** (Windows/Linux) or **Cmd** (Mac) and click to select exactly 3 channels.
+Click **Launch State Editor**. Press `h` in the editor for the full list of
+keyboard/mouse controls.
 
-### 3. Motion / EMG File
-The GUI auto-detects a motion file from the LFP folder in priority order:
+### Scoring in the editor
 
-| Priority | File | Description |
-|----------|------|-------------|
-| 1st | `emg_rms.npy` | EMG root-mean-square (preferred) |
-| 2nd | `emg_data.npy` | Raw EMG data |
-| 3rd | `theta_delta_ratio.npy` | Theta/delta ratio |
-| 4th | `awakeness.npy` | Awakeness signal |
-
-You can also click **Browse** to select any `.npy` file manually.
-
-### 4. Select Output Folder
-Choose where `TheStateEditor` will save its output files. Defaults to the LFP folder.
-
-### 5. Set Parameters
-- **Sampling Rate (Hz):** LFP sampling rate (default: `1000`)
-- **Session Name:** Base name for output files (default: `HM_neurons`)
-
-### 6. Launch
-Click **Launch TheStateEditor**. The GUI loads the 3 selected channels and motion signal, then opens the state editor. Press `H` inside the editor for a full list of keyboard shortcuts.
+- **Arm a state** with the coloured toolbar buttons (or keys `1`–`5`, `0` to
+  erase); click again / press `c` to un-arm.
+- **Score an epoch**: with a state armed, click two time points (or press
+  `Space` twice) to assign it to that span (minimum 10 s).
+- **Navigate**: `← →` move the time cursor (hold to accelerate), `Shift+← →`
+  pan, scroll to zoom, `Home`/`End` jump to the ends, `r` resets the view.
+- **Save / load**: the toolbar has **Save .npy** (NumPy `.npz`), **Save .mat**
+  (`s`), and **Load** (reads either format, `l`). `u` undoes the last change.
 
 ## Output
 
-Pressing `S` in the state editor saves a `<SessionName>-states.mat` file to the output folder containing:
+Saved scoring contains:
 
 | Field | Description |
 |-------|-------------|
-| `states` | Vector of length N (seconds), values 0–5 indicating sleep state per bin |
-| `events` | N×2 matrix of event numbers and timestamps (seconds) |
-| `transitions` | N×3 matrix of exact state transitions: [state, start\_time, end\_time] |
+| `states` | Length-N vector (1 s bins), values 0–5 per bin |
+| `events` | N×2 array of event numbers and timestamps (s) |
+| `transitions` | N×3 array `[state, start_s, end_s]` |
+| `timestamps` | (`.npz` only) per-bin time in seconds |
 
-A `<SessionName>.eegstates.mat` cache file is also created on first run to store whitened spectrograms, speeding up subsequent loads.
+`.npz` is the native NumPy format; `.mat` is written via SciPy for
+compatibility with other tools. A `<SessionName>.eegstates` cache of the
+whitened spectrograms is created on first run to speed up subsequent loads.
 
-## Motion Input Options
+## Repository layout
 
-`TheStateEditor` supports the following `MotionType` values:
-
-| Value | Description |
-|-------|-------------|
-| `'none'` | No motion signal |
-| `'File'` | Pre-computed motion signal passed directly (used by this GUI) |
-| `'Whl'` | Wheel data |
-| `'Channels (accelerometer)'` | Raw accelerometer channels |
-| `'Channels (MEG)'` | MEG channels |
+```text
+python/
+├── sleepscore.py       # entry point (the `sleepscore` command)
+├── setup_gui.py        # setup GUI (folder/channel/parameter selection)
+├── state_editor.py     # interactive spectrogram + scoring editor
+├── processing.py       # LFP preprocessing, spectrograms, motion processing
+├── buzsaki_score.py    # optional Buzsáki auto-scoring
+└── test_pipeline.py    # headless smoke test
+LFP_Output/             # example data folder
+```
 
 ## License
 

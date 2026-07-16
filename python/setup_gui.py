@@ -8,20 +8,23 @@ from __future__ import annotations
 
 import os
 import sys
+import glob
 
 import numpy as np
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIntValidator, QDoubleValidator, QColor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QGroupBox,
-    QFileDialog, QSizePolicy,
+    QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFrame,
+    QFileDialog, QSizePolicy, QScrollArea, QGraphicsDropShadowEffect,
 )
 
 from processing import (compute_channel_spectrogram, process_motion,
                         detect_sampling_rate, cache_path, save_cache, load_cache,
                         find_lfp_source, load_lfp_channel, find_output)
 from state_editor import StateEditor
+from mac_vibrancy import apply_vibrancy
 
 # motion processing modes shown in the dropdown -> process_motion() mode string
 MOTION_MODES = {
@@ -39,6 +42,91 @@ EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
 # acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
 LFP_FS_MAX = 5000
 
+# --- Apple-style palette (light) -------------------------------------------
+ACCENT = "#007AFF"     # systemBlue
+INK = "#1D1D1F"        # primary label
+MUTED = "#8A8A8E"      # systemGray
+OK_GREEN = "#34C759"   # systemGreen
+WARN = "#FF9500"       # systemOrange
+ERR = "#FF3B30"        # systemRed
+_BG = "#F2F2F5"
+_CARD = "#FFFFFF"
+_SEP = "#E4E4E8"
+_BORDER = "#D1D1D6"
+
+# Real behind-window blur (NSVisualEffectView) is opt-in via HM_VIBRANCY=1 — on
+# some Qt/macOS builds it can hide the content, so the default is a reliable
+# opaque light gradient with translucent panels that simulates the frosted look.
+_VIBRANCY = bool(os.environ.get("HM_VIBRANCY"))
+_ROOT_BG = "transparent" if _VIBRANCY else (
+    "qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+    " stop:0 #F4F6FB, stop:0.5 #F2F1F8, stop:1 #FAF0F4)")
+
+# Translucent "frosted materials" theme. The window is made see-through (via
+# mac_vibrancy) so the NSVisualEffectView blur shows behind these semi-transparent
+# panels; without vibrancy it falls back to the system window background.
+STYLESHEET = f"""
+QMainWindow {{ background: transparent; }}
+QWidget#Root {{ background: {_ROOT_BG}; }}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
+QLabel {{ color: {INK}; font-size: 13px; background: transparent; }}
+
+QLabel#AppTitle    {{ font-size: 22px; font-weight: 700; color: {INK}; letter-spacing: -0.3px; }}
+QLabel#AppSubtitle {{ font-size: 12.5px; color: {MUTED}; }}
+QLabel#Step        {{ font-size: 11px; font-weight: 700; color: #ffffff;
+                      background: {ACCENT}; border-radius: 10px;
+                      min-width: 20px; max-width: 20px; min-height: 20px;
+                      max-height: 20px; qproperty-alignment: AlignCenter; }}
+QLabel#CardTitle   {{ font-size: 14px; font-weight: 600; color: {INK}; letter-spacing: -0.2px; }}
+QLabel#FieldLabel  {{ font-size: 12px; color: #55555A; }}
+QLabel#Hint        {{ font-size: 11.5px; color: {MUTED}; }}
+
+QFrame#Card {{ background: rgba(255,255,255,62%);
+               border: 1px solid rgba(255,255,255,55%); border-radius: 16px; }}
+QFrame#Divider {{ background: rgba(60,60,67,12%); max-height: 1px; border: none; }}
+
+QLineEdit {{ background: rgba(255,255,255,78%); border: 1px solid rgba(60,60,67,16%);
+             border-radius: 9px; padding: 7px 11px; font-size: 13px; color: {INK};
+             selection-background-color: {ACCENT}; selection-color: #fff; }}
+QLineEdit:focus {{ border: 2px solid {ACCENT}; padding: 6px 10px; }}
+QLineEdit:read-only {{ background: rgba(245,245,247,55%); color: #3A3A3C; }}
+QLineEdit:disabled {{ background: rgba(245,245,247,40%); color: #AFAFB4; }}
+
+QComboBox {{ background: rgba(255,255,255,78%); border: 1px solid rgba(60,60,67,16%);
+             border-radius: 9px; padding: 6px 11px; font-size: 13px; min-height: 20px; color: {INK}; }}
+QComboBox:focus {{ border: 2px solid {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: #FFFFFF; border: 1px solid {_SEP};
+             border-radius: 8px; padding: 4px; outline: none;
+             selection-background-color: {ACCENT}; selection-color: #fff; }}
+
+QCheckBox {{ font-size: 13px; color: {INK}; spacing: 8px; background: transparent; }}
+QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 6px;
+                        border: 1px solid rgba(60,60,67,25%); background: rgba(255,255,255,80%); }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT}; }}
+QCheckBox::indicator:disabled {{ background: rgba(235,235,238,55%); border: 1px solid #DADADE; }}
+
+QPushButton#Browse {{ background: rgba(255,255,255,72%); border: 1px solid rgba(60,60,67,14%);
+                      border-radius: 8px; padding: 6px 15px; font-size: 12.5px;
+                      color: {ACCENT}; font-weight: 500; }}
+QPushButton#Browse:hover {{ background: rgba(255,255,255,94%); }}
+QPushButton#Browse:pressed {{ background: rgba(235,235,240,90%); }}
+
+QPushButton#Launch {{ background: {ACCENT}; color: #ffffff; font-size: 15px;
+                      font-weight: 600; border: none; border-radius: 12px; padding: 13px;
+                      letter-spacing: -0.2px; }}
+QPushButton#Launch:hover {{ background: #0A6CE0; }}
+QPushButton#Launch:pressed {{ background: #0A5FC5; }}
+QPushButton#Launch:disabled {{ background: rgba(120,130,145,42%); color: rgba(255,255,255,85%); }}
+
+QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: rgba(120,120,128,42%); border-radius: 5px; min-height: 32px; }}
+QScrollBar::handle:vertical:hover {{ background: rgba(120,120,128,64%); }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+"""
+
 
 class SetupGUI(QMainWindow):
     def __init__(self):
@@ -46,141 +134,290 @@ class SetupGUI(QMainWindow):
         self.lfp_folder = ""
         self.emg_file = ""
         self.out_folder = ""
+        self.prev_file = ""         # previously saved -states.npz/.mat to resume from
         self.lfp_source = None      # dict from find_lfp_source, set on folder select
 
         self.setWindowTitle("Sleep Score Setup")
-        self.resize(820, 620)
-        self.setMinimumSize(700, 560)
+        self.resize(860, 720)
+        self.setMinimumSize(720, 600)
         self._build()
+        self._update_ready()
 
     # ------------------------------------------------------------------ layout
+    def _card(self, step, title, subtitle=""):
+        """A white rounded card with a numbered step badge + title. Returns the
+        card frame and an inner QVBoxLayout to add content rows to."""
+        card = QFrame()
+        card.setObjectName("Card")
+        shadow = QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(22)
+        shadow.setXOffset(0)
+        shadow.setYOffset(3)
+        shadow.setColor(QColor(0, 0, 0, 24))
+        card.setGraphicsEffect(shadow)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(16, 14, 16, 16)
+        outer.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(9)
+        badge = QLabel(str(step))
+        badge.setObjectName("Step")
+        head.addWidget(badge)
+        tt = QLabel(title)
+        tt.setObjectName("CardTitle")
+        head.addWidget(tt)
+        head.addStretch(1)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("Hint")
+            head.addWidget(sub)
+        outer.addLayout(head)
+        return card, outer
+
+    def _dot(self):
+        d = QLabel("●")
+        d.setFixedWidth(16)
+        d.setStyleSheet("color: #c7ccd2; font-size: 14px;")
+        return d
+
+    def _set_dot(self, dot, state):
+        colors = {"ok": OK_GREEN, "warn": WARN, "off": "#c7ccd2"}
+        dot.setStyleSheet(f"color: {colors[state]}; font-size: 14px;")
+
+    def _path_row(self, edit, browse_cb, dot, placeholder, tooltip):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(dot)
+        edit.setReadOnly(True)
+        edit.setPlaceholderText(placeholder)
+        edit.setToolTip(tooltip)
+        edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        row.addWidget(edit, 1)
+        btn = QPushButton("Browse…")
+        btn.setObjectName("Browse")
+        btn.clicked.connect(browse_cb)
+        row.addWidget(btn)
+        return row
+
     def _build(self):
         root = QWidget()
+        root.setObjectName("Root")
         self.setCentralWidget(root)
-        v = QVBoxLayout(root)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(6)
+        self.setStyleSheet(STYLESHEET)
 
-        def header(text):
-            lbl = QLabel(text)
-            lbl.setStyleSheet("font-weight:700;")
-            v.addWidget(lbl)
+        page = QVBoxLayout(root)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
 
-        def path_row(edit, browse_cb):
-            row = QHBoxLayout()
-            edit.setReadOnly(True)
-            row.addWidget(edit, 1)
-            btn = QPushButton("Browse…")
-            btn.clicked.connect(browse_cb)
-            row.addWidget(btn)
-            v.addLayout(row)
+        # --- header band --------------------------------------------------
+        header = QWidget()
+        hb = QVBoxLayout(header)
+        hb.setContentsMargins(22, 18, 22, 10)
+        hb.setSpacing(2)
+        title = QLabel("🧠  Sleep Score")
+        title.setObjectName("AppTitle")
+        hb.addWidget(title)
+        sub = QLabel("Load an LFP recording, pick channels, then open the state editor.")
+        sub.setObjectName("AppSubtitle")
+        hb.addWidget(sub)
+        page.addWidget(header)
 
-        # LFP folder
-        header("LFP Output Folder")
+        # --- scrollable body of cards ------------------------------------
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        v = QVBoxLayout(body)
+        v.setContentsMargins(22, 8, 22, 8)
+        v.setSpacing(14)
+        scroll.setWidget(body)
+        page.addWidget(scroll, 1)
+
+        # ============ Card 1: data sources ================================
+        c1, box = self._card(1, "Data sources")
+
+        box.addWidget(self._field_label("LFP output folder"))
         self.lfp_edit = QLineEdit()
-        path_row(self.lfp_edit, self._sel_lfp)
+        self.lfp_dot = self._dot()
+        box.addLayout(self._path_row(
+            self.lfp_edit, self._sel_lfp, self.lfp_dot,
+            "folder containing lfp_data.npy or channels_npy/",
+            "The exported LFP folder for this session."))
+        self.info_label = QLabel("")
+        self.info_label.setObjectName("Hint")
+        self.info_label.setWordWrap(True)
+        box.addWidget(self.info_label)
 
-        # Channels
-        header("Channel Numbers (1-N)")
+        box.addWidget(self._divider())
+
+        box.addWidget(self._field_label("Motion / EMG file"))
+        self.emg_edit = QLineEdit()
+        self.emg_dot = self._dot()
+        box.addLayout(self._path_row(
+            self.emg_edit, self._sel_emg, self.emg_dot,
+            "auto-detected from the LFP folder, or browse a .npy",
+            "Motion / EMG signal used to separate wake from sleep."))
+        self.emg_auto = QLabel("")
+        self.emg_auto.setObjectName("Hint")
+        box.addWidget(self.emg_auto)
+
+        box.addWidget(self._divider())
+
+        box.addWidget(self._field_label("Output / save folder"))
+        self.out_edit = QLineEdit()
+        self.out_dot = self._dot()
+        box.addLayout(self._path_row(
+            self.out_edit, self._sel_out, self.out_dot,
+            "where -states.mat and the cache are written",
+            "Results (scoring, cache) are saved here. Defaults to the LFP folder."))
+
+        box.addWidget(self._divider())
+
+        box.addWidget(self._field_label("Resume from previous scoring (optional)"))
+        self.prev_edit = QLineEdit()
+        self.prev_dot = self._dot()
+        box.addLayout(self._path_row(
+            self.prev_edit, self._sel_prev, self.prev_dot,
+            "auto-detected saved -states.npz / .mat, or browse",
+            "Load an earlier scoring to continue where you left off."))
+        v.addWidget(c1)
+
+        # ============ Card 2: recording & parameters ======================
+        c2, box2 = self._card(2, "Recording & parameters")
+
         chrow = QHBoxLayout()
+        chrow.setSpacing(8)
+        lbl = self._field_label("Channels to score")
+        chrow.addWidget(lbl)
+        chrow.addSpacing(6)
         self.ch_edits = []
         for k in range(3):
-            chrow.addWidget(QLabel(f"Ch {k + 1}:"))
             e = QLineEdit(str(k + 1))
-            e.setFixedWidth(56)
+            e.setFixedWidth(52)
+            e.setValidator(QIntValidator(1, 9999, self))
+            e.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            e.setToolTip(f"1-based channel number for slot {k + 1}")
             self.ch_edits.append(e)
             chrow.addWidget(e)
-            chrow.addSpacing(12)
+        chrow.addWidget(self._hint("(1-based; three distinct channels)"))
         chrow.addStretch(1)
-        v.addLayout(chrow)
+        box2.addLayout(chrow)
 
-        # Motion / EMG
-        header("Motion / EMG File")
-        self.emg_edit = QLineEdit()
-        path_row(self.emg_edit, self._sel_emg)
-        self.emg_auto = QLabel("")
-        v.addWidget(self.emg_auto)
-
-        # Output folder
-        header("Output / Save Folder")
-        self.out_edit = QLineEdit()
-        path_row(self.out_edit, self._sel_out)
-
-        # Recording info (channels / duration, filled in after folder select)
-        self.info_label = QLabel("")
-        self.info_label.setStyleSheet("color:#444444;")
-        self.info_label.setWordWrap(True)
-        v.addWidget(self.info_label)
-
-        # Parameters
-        params = QGroupBox("Parameters")
-        pg = QGridLayout(params)
-        pg.addWidget(QLabel("Sampling Rate (Hz):"), 0, 0)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.addWidget(self._field_label("Sampling rate (Hz)"), 0, 0)
         self.fs_edit = QLineEdit("1500")
-        self.fs_edit.setFixedWidth(80)
-        pg.addWidget(self.fs_edit, 0, 1)
-        pg.addWidget(QLabel("Session Name:"), 0, 2)
+        self.fs_edit.setFixedWidth(90)
+        self.fs_edit.setValidator(QDoubleValidator(1.0, 1e6, 3, self))
+        self.fs_edit.setToolTip("LFP sampling rate. Auto-filled from lfp_timestamps.npy when sensible.")
+        grid.addWidget(self.fs_edit, 0, 1)
+        grid.addWidget(self._field_label("Session name"), 0, 2)
         self.name_edit = QLineEdit("HM_neurons")
-        pg.addWidget(self.name_edit, 0, 3)
-        pg.addWidget(QLabel("Motion type:"), 1, 0)
+        self.name_edit.setToolTip("Base name for saved files. Auto-filled from the folder's session prefix.")
+        grid.addWidget(self.name_edit, 0, 3)
+        grid.addWidget(self._field_label("Motion type"), 1, 0)
         self.motion_combo = QComboBox()
         self.motion_combo.addItems(list(MOTION_MODES.keys()))
-        pg.addWidget(self.motion_combo, 1, 1, 1, 3)
+        self.motion_combo.setToolTip("How the motion/EMG file is processed into a movement trace.")
+        grid.addWidget(self.motion_combo, 1, 1, 1, 3)
+        grid.setColumnStretch(3, 1)
+        box2.addLayout(grid)
 
-        self.recompute_chk = QCheckBox("Ignore cache (recompute)")
-        pg.addWidget(self.recompute_chk, 2, 0, 1, 4)
+        self.recompute_chk = QCheckBox("Ignore cache (recompute spectrograms)")
+        self.recompute_chk.setToolTip("Force a fresh compute instead of loading the cached spectrograms.")
+        box2.addWidget(self.recompute_chk)
+        v.addWidget(c2)
 
-        # Buzsáki auto-scoring: shown as an extra panel in the editor. Loads a
-        # saved buzsaki_states.npz if present, or computes one when ticked.
-        self.buzsaki_chk = QCheckBox("Show Buzsáki auto-score (recompute on open)")
+        # ============ Card 3: auto-scoring ================================
+        c3, box3 = self._card(3, "Auto-scoring (Buzsáki)", "optional")
+        self.buzsaki_chk = QCheckBox("Show Buzsáki auto-score in the editor (recomputes on open)")
         self.buzsaki_chk.setChecked(True)
-        pg.addWidget(self.buzsaki_chk, 3, 0, 1, 4)
+        self.buzsaki_chk.toggled.connect(self._toggle_thresholds)
+        box3.addWidget(self.buzsaki_chk)
 
-        # Editable scoring thresholds — multipliers on the auto (bimodal) thresholds
-        # (1.0 = auto; lower = more permissive), plus drowsy-band width & min epoch.
         import buzsaki_score as _bz
-        thr = QHBoxLayout()
-        lab = QLabel("Thresholds:")
-        lab.setStyleSheet("font-weight:700;")
-        thr.addWidget(lab)
+        self.thr_grid = QGridLayout()
+        self.thr_grid.setHorizontalSpacing(12)
+        self.thr_grid.setVerticalSpacing(4)
         self.swf_edit = QLineEdit("1.0")
         self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
-        self.emgf_edit = QLineEdit("1.0")
+        self.emgf_edit = QLineEdit("2.5")
         self.drowsy_edit = QLineEdit(str(_bz.DROWSY_FRAC))
         self.minsec_edit = QLineEdit("10")
-        for lbl, edit in [("SW× (NREM)", self.swf_edit), ("θ× (REM)", self.thf_edit),
-                          ("EMG× (wake)", self.emgf_edit), ("drowsy", self.drowsy_edit),
-                          ("min ep (s)", self.minsec_edit)]:
-            thr.addSpacing(8)
-            thr.addWidget(QLabel(lbl))
-            edit.setFixedWidth(48)
-            thr.addWidget(edit)
-        thr.addStretch(1)
-        pg.addLayout(thr, 4, 0, 1, 4)
-        hint = QLabel("1.0 = auto  ·  ↓SW = more sleep  ·  ↓θ = more REM  ·  ↓EMG = more wake")
-        hint.setStyleSheet("color:#777777;")
-        pg.addWidget(hint, 5, 0, 1, 4)
-        v.addWidget(params)
-
-        # Status + launch
-        self.status = QLabel("Ready. Select an LFP folder to begin.")
-        self.status.setStyleSheet("color:#333333;")
-        self.status.setWordWrap(True)
-        v.addWidget(self.status)
-
+        fields = [("SW×  (NREM)", self.swf_edit, "Slow-wave threshold multiplier. ↓ = more NREM."),
+                  ("θ×  (REM)", self.thf_edit, "Theta threshold multiplier. ↓ = more REM."),
+                  ("EMG×  (wake)", self.emgf_edit, "EMG threshold multiplier. ↓ = more wake."),
+                  ("drowsy", self.drowsy_edit, "Width of the drowsy/light band."),
+                  ("min ep (s)", self.minsec_edit, "Shortest epoch kept, in seconds.")]
+        for i, (lbl, edit, tip) in enumerate(fields):
+            head = self._field_label(lbl)
+            self.thr_grid.addWidget(head, 0, i, Qt.AlignmentFlag.AlignHCenter)
+            edit.setFixedWidth(64)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.setValidator(QDoubleValidator(0.0, 100.0, 3, self))
+            edit.setToolTip(tip)
+            self.thr_grid.addWidget(edit, 1, i, Qt.AlignmentFlag.AlignHCenter)
+        box3.addLayout(self.thr_grid)
+        box3.addWidget(self._hint(
+            "1.0 = automatic threshold  ·  ↓SW → more sleep  ·  ↓θ → more REM  ·  ↓EMG → more wake"))
+        v.addWidget(c3)
         v.addStretch(1)
-        launch = QPushButton("Launch State Editor")
-        launch.setStyleSheet(
-            "QPushButton{background:#2e8b2e; color:white; font-size:14px; "
-            "font-weight:700; padding:10px;} QPushButton:hover{background:#37a337;}")
-        launch.clicked.connect(self._launch)
-        launch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        v.addWidget(launch)
+
+        # --- footer: status + launch -------------------------------------
+        footer = QWidget()
+        fb = QVBoxLayout(footer)
+        fb.setContentsMargins(22, 6, 22, 16)
+        fb.setSpacing(10)
+        self.status = QLabel("Ready. Select an LFP folder to begin.")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet(f"color: {INK}; font-size: 12px;")
+        fb.addWidget(self.status)
+        self.launch_btn = QPushButton("Launch State Editor")
+        self.launch_btn.setObjectName("Launch")
+        self.launch_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.launch_btn.clicked.connect(self._launch)
+        fb.addWidget(self.launch_btn)
+        page.addWidget(footer)
+
+    # -- tiny widget factories --------------------------------------------
+    def _field_label(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("FieldLabel")
+        return lbl
+
+    def _hint(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("Hint")
+        return lbl
+
+    def _divider(self):
+        line = QFrame()
+        line.setObjectName("Divider")
+        line.setFrameShape(QFrame.Shape.HLine)
+        return line
+
+    def _toggle_thresholds(self, on):
+        for e in (self.swf_edit, self.thf_edit, self.emgf_edit,
+                  self.drowsy_edit, self.minsec_edit):
+            e.setEnabled(on)
+
+    def _update_ready(self):
+        """Enable Launch only when the three required paths are set."""
+        ready = bool(self.lfp_folder and self.emg_file and self.out_folder)
+        self.launch_btn.setEnabled(ready)
+        if ready:
+            self.launch_btn.setText("▶  Launch State Editor")
+        else:
+            missing = [name for name, val in
+                       [("LFP folder", self.lfp_folder), ("motion/EMG file", self.emg_file),
+                        ("output folder", self.out_folder)] if not val]
+            self.launch_btn.setText(f"Launch State Editor  (set {', '.join(missing)})")
 
     # ------------------------------------------------------------------ helpers
-    def _set_status(self, msg, color="#333333"):
+    def _set_status(self, msg, color=INK):
         self.status.setText(msg)
-        self.status.setStyleSheet(f"color:{color};")
+        self.status.setStyleSheet(f"color: {color}; font-size: 12px;")
         QApplication.processEvents()
 
     def _show_recording_info(self, folder):
@@ -225,11 +462,12 @@ class SetupGUI(QMainWindow):
         self.lfp_edit.setText(folder)
         self.lfp_source = find_lfp_source(folder)
         if self.lfp_source is None:
-            self._set_status("Warning: no lfp_data.npy or channels_npy/ found here.",
-                             "#cc6600")
+            self._set_status("Warning: no lfp_data.npy or channels_npy/ found here.", WARN)
             self.info_label.setText("")
+            self._set_dot(self.lfp_dot, "warn")
         else:
-            self._set_status("Folder loaded. Enter channels, then Launch.", "#000000")
+            self._set_status("Folder loaded. Enter channels, then Launch.", INK)
+            self._set_dot(self.lfp_dot, "ok")
             self._show_recording_info(folder)
             # Auto-detect the rat_sessiondate_ prefix from the folder's files and
             # use it as the session name, so saved files share the session naming.
@@ -238,7 +476,7 @@ class SetupGUI(QMainWindow):
             if pfx:
                 self.name_edit.setText(pfx.rstrip("_"))
                 self._set_status(f"Folder loaded. Session: {pfx.rstrip('_')}. "
-                                 f"Enter channels, then Launch.", "#000000")
+                                 f"Enter channels, then Launch.", INK)
 
         self.emg_file = ""
         for cand in EMG_CANDIDATES:
@@ -246,15 +484,20 @@ class SetupGUI(QMainWindow):
             if p is not None:
                 self.emg_file = str(p)
                 self.emg_edit.setText(str(p))
-                self.emg_auto.setText(f"Auto-detected: {os.path.basename(p)}")
-                self.emg_auto.setStyleSheet("color:#007000;")
+                self.emg_auto.setText(f"✓ Auto-detected: {os.path.basename(p)}")
+                self.emg_auto.setStyleSheet(f"color: {OK_GREEN}; font-size: 11px;")
+                self._set_dot(self.emg_dot, "ok")
                 break
         if not self.emg_file:
-            self.emg_auto.setText("No EMG file auto-detected - browse manually.")
-            self.emg_auto.setStyleSheet("color:#cc6600;")
+            self.emg_auto.setText("No EMG file auto-detected — browse for one manually.")
+            self.emg_auto.setStyleSheet(f"color: {WARN}; font-size: 11px;")
+            self._set_dot(self.emg_dot, "warn")
         if not self.out_folder:
             self.out_folder = folder
             self.out_edit.setText(folder)
+            self._set_dot(self.out_dot, "ok")
+        self._autodetect_prev()
+        self._update_ready()
 
     def _sel_emg(self):
         start = self.lfp_folder or os.getcwd()
@@ -264,28 +507,59 @@ class SetupGUI(QMainWindow):
             return
         self.emg_file = f
         self.emg_edit.setText(f)
-        self.emg_auto.setText("Motion file set manually.")
-        self.emg_auto.setStyleSheet("color:#000099;")
+        self.emg_auto.setText(f"✓ Set manually: {os.path.basename(f)}")
+        self.emg_auto.setStyleSheet("color: #0060c0; font-size: 11px;")
+        self._set_dot(self.emg_dot, "ok")
+        self._update_ready()
 
     def _sel_out(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Output / Save Folder")
         if folder:
             self.out_folder = folder
             self.out_edit.setText(folder)
+            self._set_dot(self.out_dot, "ok")
+            self._autodetect_prev()
+            self._update_ready()
+
+    def _sel_prev(self):
+        start = self.out_folder or self.lfp_folder or os.getcwd()
+        f, _ = QFileDialog.getOpenFileName(self, "Select previous scoring", start,
+                                           "Scoring (*.npz *.mat)")
+        if not f:
+            return
+        self.prev_file = f
+        self.prev_edit.setText(f)
+        self.prev_edit.setToolTip(f)
+        self._set_dot(self.prev_dot, "ok")
+
+    def _autodetect_prev(self):
+        """Look for an existing saved scoring in the output / LFP folders and
+        offer it, preferring the NumPy .npz over the MATLAB .mat."""
+        for folder in (self.out_folder, self.lfp_folder):
+            if not folder:
+                continue
+            hits = (sorted(glob.glob(os.path.join(folder, "*-states.npz"))) or
+                    sorted(glob.glob(os.path.join(folder, "*-states.mat"))))
+            if hits:
+                self.prev_file = hits[0]
+                self.prev_edit.setText(hits[0])
+                self.prev_edit.setToolTip(hits[0])
+                self._set_dot(self.prev_dot, "ok")
+                return
 
     # ------------------------------------------------------------------ launch
     def _launch(self):
         if not self.lfp_folder:
-            return self._set_status("Error: select an LFP folder.", "#cc0000")
+            return self._set_status("Error: select an LFP folder.", ERR)
         if not self.emg_file:
-            return self._set_status("Error: select a motion/EMG file.", "#cc0000")
+            return self._set_status("Error: select a motion/EMG file.", ERR)
         if not self.out_folder:
-            return self._set_status("Error: select an output folder.", "#cc0000")
+            return self._set_status("Error: select an output folder.", ERR)
         try:
             eeg_fs = float(self.fs_edit.text())
             assert eeg_fs > 0
         except (ValueError, AssertionError):
-            return self._set_status("Error: sampling rate must be positive.", "#cc0000")
+            return self._set_status("Error: sampling rate must be positive.", ERR)
 
         chs = []
         for k, e in enumerate(self.ch_edits):
@@ -293,11 +567,10 @@ class SetupGUI(QMainWindow):
                 val = int(e.text().strip())
                 assert val >= 1
             except (ValueError, AssertionError):
-                return self._set_status(f"Error: Ch {k + 1} must be a whole number >= 1.",
-                                        "#cc0000")
+                return self._set_status(f"Error: Ch {k + 1} must be a whole number >= 1.", ERR)
             chs.append(val)
         if len(set(chs)) < 3:
-            return self._set_status("Error: all 3 channels must differ.", "#cc0000")
+            return self._set_status("Error: all 3 channels must differ.", ERR)
 
         base = self.name_edit.text().strip() or "session"
         # Prefix saved files (-states.mat, cache) with the session's rat_sessiondate_
@@ -311,15 +584,14 @@ class SetupGUI(QMainWindow):
         try:
             self._run(chs, eeg_fs, base)
         except Exception as exc:  # surface any load/compute failure in the GUI
-            self._set_status(f"Error: {exc}", "#cc0000")
+            self._set_status(f"Error: {exc}", ERR)
             raise
 
     def _run(self, chs, eeg_fs, base):
         source = self.lfp_source or find_lfp_source(self.lfp_folder)
         if source is None:
             return self._set_status(
-                f"Error: no lfp_data.npy or channels_npy/ found in {self.lfp_folder}",
-                "#cc0000")
+                f"Error: no lfp_data.npy or channels_npy/ found in {self.lfp_folder}", ERR)
 
         cpath = cache_path(self.out_folder, base)
         cached = None
@@ -335,8 +607,7 @@ class SetupGUI(QMainWindow):
                 if c not in available:
                     return self._set_status(
                         f"Error: channel {c} not available "
-                        f"(have {source['channels'][0]}-{source['channels'][-1]}).",
-                        "#cc0000")
+                        f"(have {source['channels'][0]}-{source['channels'][-1]}).", ERR)
 
             specs, fos, raw_eeg = [], [], []
             to = None
@@ -367,15 +638,22 @@ class SetupGUI(QMainWindow):
         auto_states, auto_ts = self._buzsaki_labels(chs)
         overlays = self._load_overlays()
 
-        self._set_status("Launching state editor ...", "#007000")
+        self._set_status("Launching state editor ...", OK_GREEN)
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
                              out_folder=self.out_folder, chs=chs,
                              auto_states=auto_states, auto_states_ts=auto_ts,
                              overlays=overlays)
+        if self.prev_file and os.path.isfile(self.prev_file):
+            self._set_status(f"Loading previous scoring: "
+                             f"{os.path.basename(self.prev_file)} ...", "#0000aa")
+            try:
+                editor.load_states(self.prev_file)
+            except Exception as exc:
+                print(f"Warning: could not load previous scoring: {exc}")
         self.hide()
         editor.show()
         self.show()
-        self._set_status("State editor closed. Results saved to output folder.", "#006600")
+        self._set_status("State editor closed. Results saved to output folder.", OK_GREEN)
 
     def _buzsaki_labels(self, chs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).
@@ -404,16 +682,15 @@ class SetupGUI(QMainWindow):
             from processing import output_prefix
             pfx = output_prefix(self.lfp_folder)
             bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
-            self._set_status("Buzsáki auto-score recomputed.", "#006600")
+            self._set_status("Buzsáki auto-score recomputed.", OK_GREEN)
             return res["states"], res["timestamps"]
         except Exception as exc:
             for folder in (self.lfp_folder, self.out_folder):
                 f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
                 if f is not None:
-                    self._set_status(f"Compute failed; loaded saved labels ({exc})",
-                                     "#cc6600")
+                    self._set_status(f"Compute failed; loaded saved labels ({exc})", WARN)
                     return bz.load_states(f)
-            self._set_status(f"Buzsáki auto-score skipped: {exc}", "#cc6600")
+            self._set_status(f"Buzsáki auto-score skipped: {exc}", WARN)
             return None, None
 
     def _load_overlays(self):
@@ -454,10 +731,17 @@ class SetupGUI(QMainWindow):
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+    try:                       # use the real macOS system UI font (San Francisco)
+        from PyQt6.QtGui import QFontDatabase
+        app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
+    except Exception:
+        pass
     gui = SetupGUI()
     gui.show()
     gui.raise_()
     gui.activateWindow()
+    if _VIBRANCY:                # opt-in real behind-window blur (HM_VIBRANCY=1)
+        apply_vibrancy(gui)
     app.exec()
 
 

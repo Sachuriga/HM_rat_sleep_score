@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hm-sleepscore"
+version = "0.1.0"
+description = "HM rat sleep-scoring toolkit + Qt GUI (sleepscore command)"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6", "numpy", "scipy", "matplotlib",
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",  # macOS window vibrancy
+]
+
+# Type `sleepscore` in any folder to open the setup GUI.
+[project.scripts]
+sleepscore = "sleepscore:main"
+
+# The scoring code is a flat set of modules under ./python (they import each
+# other by bare name, e.g. `from processing import ...`). Expose them as
+# top-level modules and install editable (`pip install -e .`) so the command
+# keeps running the code in place.
+[tool.setuptools]
+package-dir = {"" = "python"}
+py-modules = ["sleepscore", "setup_gui", "state_editor", "processing",
+              "buzsaki_score", "mac_vibrancy"]
