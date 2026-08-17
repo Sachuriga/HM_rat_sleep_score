@@ -42,6 +42,11 @@ EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
 # acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
 LFP_FS_MAX = 5000
 
+# sleep_channels.npy holds the per-rat tetrodes from SLEEP_CHANNELS_<rat> in
+# hm_tracker_paths.txt, keyed by Buzsáki role. These are the three channels the
+# scorer should look at, in this order, shown under these display names.
+SLEEP_ROLE_LABELS = [("cortex", "cortex"), ("sr", "EEG"), ("pyr", "pyr")]
+
 # --- Apple-style palette (light) -------------------------------------------
 ACCENT = "#007AFF"     # systemBlue
 INK = "#1D1D1F"        # primary label
@@ -136,6 +141,7 @@ class SetupGUI(QMainWindow):
         self.out_folder = ""
         self.prev_file = ""         # previously saved -states.npz/.mat to resume from
         self.lfp_source = None      # dict from find_lfp_source, set on folder select
+        self.sleep_channels = {}    # {role: tetrode} from sleep_channels.npy
 
         self.setWindowTitle("Sleep Score Setup")
         self.resize(860, 720)
@@ -454,6 +460,46 @@ class SetupGUI(QMainWindow):
             f"{len(chans)} channels ({rng}) via {layout}, {n_samples:,} samples, "
             f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
+    def _prefill_sleep_channels(self, folder):
+        """Fill the three channel boxes from the folder's sleep_channels.npy.
+
+        That file is written by the tracker's LFP export from SLEEP_CHANNELS_<rat>
+        (cortex / sr / pyr tetrodes), so the boxes start on the right layers for
+        this rat instead of the generic 1/2/3. Typing over a box still wins.
+        """
+        self.sleep_channels = {}
+        p = find_output(folder, "sleep_channels.npy")
+        if p is None:
+            return
+        try:
+            sc = np.load(p, allow_pickle=True).item()
+        except Exception as exc:
+            print(f"Warning: could not read {p}: {exc}")
+            return
+        if not isinstance(sc, dict):
+            return
+
+        self.sleep_channels = sc
+        filled = []
+        for e, (role, label) in zip(self.ch_edits, SLEEP_ROLE_LABELS):
+            ch = sc.get(role)
+            if ch is None:
+                continue
+            e.setText(str(int(ch)))
+            e.setToolTip(f"{label} — tetrode {int(ch)} from SLEEP_CHANNELS_<rat>")
+            filled.append(f"{label} {int(ch)}")
+        if filled:
+            self._set_status(f"Channels set from sleep_channels.npy: "
+                             f"{', '.join(filled)}.", OK_GREEN)
+
+    def _channel_labels(self, chs):
+        """Display name per entered channel: the SLEEP_CHANNELS role it matches,
+        else None so the editor falls back to ``Ch <n>``. Matching by value (not
+        by slot) keeps the names honest when a box is typed over or reordered."""
+        by_ch = {int(ch): label for role, label in SLEEP_ROLE_LABELS
+                 if (ch := self.sleep_channels.get(role)) is not None}
+        return [by_ch.get(int(c)) for c in chs]
+
     def _sel_lfp(self):
         folder = QFileDialog.getExistingDirectory(self, "Select LFP Output Folder")
         if not folder:
@@ -469,6 +515,7 @@ class SetupGUI(QMainWindow):
             self._set_status("Folder loaded. Enter channels, then Launch.", INK)
             self._set_dot(self.lfp_dot, "ok")
             self._show_recording_info(folder)
+            self._prefill_sleep_channels(folder)
             # Auto-detect the rat_sessiondate_ prefix from the folder's files and
             # use it as the session name, so saved files share the session naming.
             from processing import output_prefix
@@ -641,6 +688,7 @@ class SetupGUI(QMainWindow):
         self._set_status("Launching state editor ...", OK_GREEN)
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
                              out_folder=self.out_folder, chs=chs,
+                             ch_labels=self._channel_labels(chs),
                              auto_states=auto_states, auto_states_ts=auto_ts,
                              overlays=overlays)
         if self.prev_file and os.path.isfile(self.prev_file):

@@ -138,7 +138,7 @@ if _HAVE_QT:
 
 class StateEditor:
     def __init__(self, base_name, specs, fos, to, motion, raw_eeg, eeg_fs,
-                 out_folder=".", states=None, chs=None,
+                 out_folder=".", states=None, chs=None, ch_labels=None,
                  auto_states=None, auto_states_ts=None,
                  auto_label="Auto", overlays=None):
         self.base_name = base_name
@@ -146,6 +146,9 @@ class StateEditor:
         self.out_folder = out_folder
         self.n_ch = len(specs)
         self.chs = list(chs) if chs is not None else list(range(1, self.n_ch + 1))
+        # Anatomical panel names (cortex / EEG / pyr) resolved from
+        # SLEEP_CHANNELS_<rat>; falls back to the bare channel number.
+        self.ch_labels = self._resolve_ch_labels(ch_labels)
         self.to = np.asarray(to, dtype=float)
         self.lims = (float(self.to[0]), float(self.to[-1]))
         self.n_bins = self.to.size
@@ -205,6 +208,26 @@ class StateEditor:
         self._build_figure()
         self._build_side_panel()
         self._connect()
+
+    def _resolve_ch_labels(self, ch_labels):
+        """One display name per scored channel.
+
+        ``ch_labels`` comes from SLEEP_CHANNELS_<rat> (cortex / EEG / pyr). Any
+        slot without a name — no config, or a channel the user typed over —
+        falls back to ``Ch <n>`` so a panel is never left unidentified.
+        """
+        given = list(ch_labels) if ch_labels else []
+        out = []
+        for i, ch in enumerate(self.chs):
+            name = given[i] if i < len(given) else None
+            out.append(str(name) if name else f"Ch {ch}")
+        return out
+
+    def _panel_title(self, i):
+        """Axis label for scored channel ``i``: ``cortex (24)``, or ``Ch 24``
+        when no anatomical name is known (the number is already in there)."""
+        label = self.ch_labels[i]
+        return label if label == f"Ch {self.chs[i]}" else f"{label} ({self.chs[i]})"
 
     def _align_auto_states(self, auto_states, auto_states_ts):
         """Resample provided auto-labels onto this session's 1 s bins (nearest)."""
@@ -471,7 +494,7 @@ class StateEditor:
                 extent=[self.to[0], self.to[-1], self.fo[mask][0], self.fo[mask][-1]],
                 cmap=cmap)
             self.spec_imgs.append(img)
-            ax.set_ylabel(f"Ch {self.chs[i]}\nFreq (Hz)")
+            ax.set_ylabel(f"{self._panel_title(i)}\nFreq (Hz)")
             ax.set_xlim(self.lims)
             if i != n - 1:
                 ax.set_xticklabels([])
@@ -550,7 +573,7 @@ class StateEditor:
             (ln,) = ax.plot([], [], color="y", lw=0.5)
             self.eeg_lines.append(ln)
             ax.set_facecolor("black")
-            ax.set_ylabel(f"Ch {self.chs[i]}", fontsize=8.5, rotation=0,
+            ax.set_ylabel(self._panel_title(i), fontsize=8.5, rotation=0,
                           ha="right", va="center", labelpad=6)
             yabs = np.percentile(np.abs(self.eeg[i]), 99.5) or 1.0
             self.eeg_yabs.append(yabs)
