@@ -68,6 +68,13 @@ MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span 
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
 ARROW_STEP = 1        # bins the time cursor moves per ← → press (1 bin = 1 s)
 EMG_SENS = 0.8        # EMG 1/0-band threshold multiplier (<1 = more sensitive)
+# Spectrogram colormaps offered in the toolbar picker: the modern perceptually-
+# uniform maps first, then the classics. Filtered at build time against what
+# this matplotlib actually provides.
+CMAP_CHOICES = ["turbo", "viridis", "plasma", "inferno", "magma", "cividis",
+                "twilight", "twilight_shifted", "cubehelix", "nipy_spectral",
+                "gist_ncar", "rainbow", "jet", "coolwarm", "Spectral",
+                "hot", "cool", "bone", "gray"]
 _VIBRANCY = bool(os.environ.get("HM_VIBRANCY"))   # opt-in macOS behind-window blur
 
 # Apple-style chrome for the editor's Qt toolbars.
@@ -652,12 +659,15 @@ class StateEditor:
         cap.setStyleSheet("font-weight:600; padding-left:6px;")
         tb2.addWidget(cap)
         cmap_combo = QComboBox()
-        cmap_combo.addItems(["turbo", "jet", "cool"])
+        cmap_combo.addItems([c for c in CMAP_CHOICES if c in matplotlib.colormaps])
+        # explicit text colours everywhere: the forced white backgrounds would
+        # otherwise render the names white-on-white under macOS dark mode
         cmap_combo.setStyleSheet(
-            "QComboBox{background:#FFFFFF; border:1px solid #D1D1D6; border-radius:7px;"
-            " padding:3px 10px; font-size:12px; min-width:72px;}"
+            "QComboBox{background:#FFFFFF; color:#1D1D1F; border:1px solid #D1D1D6;"
+            " border-radius:7px; padding:3px 10px; font-size:12px; min-width:110px;}"
             "QComboBox::drop-down{border:none; width:18px;}"
-            "QComboBox QAbstractItemView{background:#FFFFFF; border:1px solid #E4E4E8;"
+            "QComboBox QAbstractItemView{background:#FFFFFF; color:#1D1D1F;"
+            " border:1px solid #E4E4E8;"
             " selection-background-color:#007AFF; selection-color:#fff; outline:none;}")
         cmap_combo.currentTextChanged.connect(lambda name: (self._on_cmap(name),
                                                             self.canvas.setFocus()))

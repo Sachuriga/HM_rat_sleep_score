@@ -366,7 +366,7 @@ def _load_motion(lfp_dir, fs):
 
 
 def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
-                          sr_channel=None, **kw):
+                          sr_channel=None, fs=None, **kw):
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
     Layer-specific channels (recommended, per-rat): ``ctx_channel`` (cortex) drives
@@ -374,15 +374,27 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     theta/REM metric. If only ``channel`` (or none) is given, a single channel
     drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
     (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
+
+    ``fs`` overrides the sampling rate detected from lfp_timestamps.npy — the
+    setup GUI passes its validated LFP rate. When detecting, a rate above
+    LFP_FS_MAX is the raw acquisition rate leaking in (e.g. 30 kHz on 1500 Hz
+    LFP data), which would stretch every metric/timestamp ~20×, so it is
+    rejected in favour of the 1500 Hz default.
     """
     from processing import (find_lfp_source, load_lfp_channel,
-                            detect_sampling_rate, find_output)
+                            detect_sampling_rate, find_output, LFP_FS_MAX)
 
     lfp_dir = Path(lfp_dir)
     src = find_lfp_source(str(lfp_dir))
     if src is None:
         raise FileNotFoundError(f"no lfp_data.npy or channels_npy/ in {lfp_dir}")
-    fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy")) or 1500.0
+    if fs is None:
+        fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy"))
+        if fs and fs > LFP_FS_MAX:
+            print(f"  warning: lfp_timestamps.npy implies {int(fs)} Hz (the raw "
+                  f"acquisition rate, not the LFP rate) — using 1500 Hz instead")
+            fs = None
+        fs = fs or 1500.0
 
     # Auto-load per-rat cortex/sr tetrodes saved by the tracker (SLEEP_CHANNELS_<rat>)
     # unless the caller passed them explicitly.

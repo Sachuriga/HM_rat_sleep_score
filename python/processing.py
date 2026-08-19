@@ -23,6 +23,11 @@ from scipy.signal import iirnotch, filtfilt, lfilter, firwin
 from scipy.signal.windows import dpss
 
 
+# LFP for sleep scoring is ~250–2000 Hz. A detected rate above this is the raw
+# acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
+LFP_FS_MAX = 5000
+
+
 def matlab_round(x: float) -> int:
     """MATLAB ``round`` rounds halves away from zero (numpy rounds to even)."""
     return int(np.floor(np.abs(x) + 0.5) * np.sign(x))

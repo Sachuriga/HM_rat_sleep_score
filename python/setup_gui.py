@@ -22,7 +22,8 @@ from PyQt6.QtWidgets import (
 
 from processing import (compute_channel_spectrogram, process_motion,
                         detect_sampling_rate, cache_path, save_cache, load_cache,
-                        find_lfp_source, load_lfp_channel, find_output)
+                        find_lfp_source, load_lfp_channel, find_output,
+                        LFP_FS_MAX)
 from state_editor import StateEditor
 from mac_vibrancy import apply_vibrancy
 
@@ -37,10 +38,6 @@ MOTION_MODES = {
 # suit the default Accelerometer mode)
 EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
                   "theta_delta_ratio.npy"]
-
-# LFP for sleep scoring is ~250–2000 Hz. Anything above this is the raw
-# acquisition rate leaking in via lfp_timestamps.npy, not a real LFP rate.
-LFP_FS_MAX = 5000
 
 # sleep_channels.npy holds the per-rat tetrodes from SLEEP_CHANNELS_<rat> in
 # hm_tracker_paths.txt, keyed by Buzsáki role. These are the three channels the
@@ -102,7 +99,7 @@ QComboBox {{ background: rgba(255,255,255,78%); border: 1px solid rgba(60,60,67,
              border-radius: 9px; padding: 6px 11px; font-size: 13px; min-height: 20px; color: {INK}; }}
 QComboBox:focus {{ border: 2px solid {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox QAbstractItemView {{ background: #FFFFFF; border: 1px solid {_SEP};
+QComboBox QAbstractItemView {{ background: #FFFFFF; color: {INK}; border: 1px solid {_SEP};
              border-radius: 8px; padding: 4px; outline: none;
              selection-background-color: {ACCENT}; selection-color: #fff; }}
 
@@ -688,7 +685,7 @@ class SetupGUI(QMainWindow):
             except Exception as exc:
                 print(f"Warning: could not write cache: {exc}")
 
-        auto_states, auto_ts = self._buzsaki_labels(chs)
+        auto_states, auto_ts = self._buzsaki_labels(chs, eeg_fs)
         overlays = self._load_overlays()
 
         self._set_status("Launching state editor ...", OK_GREEN)
@@ -712,12 +709,14 @@ class SetupGUI(QMainWindow):
         self._set_status("State editor closed. Results saved to the 'results' "
                          "subfolder of the LFP folder.", OK_GREEN)
 
-    def _buzsaki_labels(self, chs):
+    def _buzsaki_labels(self, chs, eeg_fs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).
 
         Recomputes fresh from the LFP folder every time (so scorer changes always
-        take effect) and overwrites buzsaki_states.npz. Only falls back to a saved
-        npz if the recompute fails.
+        take effect) and overwrites buzsaki_states.npz. Runs at the GUI's
+        validated LFP rate ``eeg_fs`` (never the raw rate a bad
+        lfp_timestamps.npy may imply). Only falls back to a saved npz if the
+        recompute fails.
         """
         if not self.buzsaki_chk.isChecked():
             return None, None
@@ -735,13 +734,16 @@ class SetupGUI(QMainWindow):
                   min_secs=_f(self.minsec_edit, 10.0))
         try:
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
-            res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0], **kw)
+            res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0],
+                                               fs=eeg_fs, **kw)
             from processing import output_prefix
             pfx = output_prefix(self.lfp_folder)
             bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
             self._set_status("Buzsáki auto-score recomputed.", OK_GREEN)
             return res["states"], res["timestamps"]
         except Exception as exc:
+            import traceback
+            traceback.print_exc()          # full details on the console
             for folder in (self.lfp_folder, self.out_folder):
                 f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
                 if f is not None:
