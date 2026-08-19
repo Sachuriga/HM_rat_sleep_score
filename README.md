@@ -23,11 +23,13 @@ Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
 Two one-time steps per machine.
 
 **1. Install the package** into a conda environment (any name — it differs per
-PC and that's fine):
+PC and that's fine). Run this **from the project root folder** (the folder
+containing `pyproject.toml`) — the `.` means "this folder":
 
 ```bash
 conda activate <your-env>
-pip install -e .          # from the project root
+cd <where-you-cloned>/HM_rat_sleep_score
+pip install -e .
 ```
 
 Because it's an editable install, edits to the code under `python/` take
@@ -35,17 +37,27 @@ effect immediately (no reinstall needed). If you later **move the repo
 folder**, rerun `pip install -e .` from the new location.
 
 **2. Put the launcher on your PATH** so `sleepscore` works from any folder
-*without* activating conda first — add to `~/.zshrc` (or `~/.bashrc`):
+*without* activating conda first.
+
+*macOS / Linux* — add to `~/.zshrc` (or `~/.bashrc`), using your machine's
+actual repo path:
 
 ```bash
-export PATH="$PATH:/path/to/HM_rat_sleep_score/bin"
+export PATH="$PATH:$HOME/Desktop/code/HM_rat_sleep_score/bin"
 ```
 
-`bin/sleepscore` auto-discovers whichever conda env has the package installed
-(checking, in order: `$SLEEPSCORE_CONDA_ENV` if set, the active env, then all
+*Windows* — add the repo's `bin` folder to your user Path: press Win, search
+"environment variables" → *Edit environment variables for your account* →
+select **Path** → *Edit* → *New* → add e.g.
+`C:\Users\<you>\Desktop\code\HM_rat_sleep_score\bin`, then open a new
+terminal. (`bin\sleepscore.bat` is the Windows launcher.)
+
+The launcher auto-discovers whichever conda env has the package installed
+(checking, in order: `SLEEPSCORE_CONDA_ENV` if set, the active env, then all
 envs of every conda/mamba install) and runs the GUI with that env's Python —
-so nothing is hardcoded to one machine's env name. `sleepscore --which` prints
-the env it would use.
+so nothing is hardcoded to one machine's env name, and stale installs left
+behind after moving the repo are skipped. `sleepscore --which` prints the env
+it would use.
 
 **Requirements:** Python ≥ 3.9, `PyQt6`, `numpy`, `scipy`, `matplotlib`
 (installed automatically by `pip install -e .`).
