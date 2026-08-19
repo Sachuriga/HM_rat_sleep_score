@@ -580,12 +580,18 @@ class SetupGUI(QMainWindow):
         self._set_dot(self.prev_dot, "ok")
 
     def _autodetect_prev(self):
-        """Look for an existing saved scoring in the output / LFP folders and
-        offer it, preferring the NumPy .npz over the MATLAB .mat."""
+        """Look for an existing saved scoring and offer it, preferring the
+        auto-saved results/ files (newest first), then any *-states.npz/.mat
+        in the output / LFP folders."""
         for folder in (self.out_folder, self.lfp_folder):
             if not folder:
                 continue
-            hits = (sorted(glob.glob(os.path.join(folder, "*-states.npz"))) or
+            # results_<date>_<name>.npz auto-saved on editor close; the sorted
+            # ISO date in the name makes the last one the most recent.
+            results = sorted(glob.glob(os.path.join(folder, "results",
+                                                    "results_*.npz")))
+            hits = (([results[-1]] if results else []) or
+                    sorted(glob.glob(os.path.join(folder, "*-states.npz"))) or
                     sorted(glob.glob(os.path.join(folder, "*-states.mat"))))
             if hits:
                 self.prev_file = hits[0]
@@ -690,7 +696,8 @@ class SetupGUI(QMainWindow):
                              out_folder=self.out_folder, chs=chs,
                              ch_labels=self._channel_labels(chs),
                              auto_states=auto_states, auto_states_ts=auto_ts,
-                             overlays=overlays)
+                             overlays=overlays,
+                             results_folder=os.path.join(self.lfp_folder, "results"))
         if self.prev_file and os.path.isfile(self.prev_file):
             self._set_status(f"Loading previous scoring: "
                              f"{os.path.basename(self.prev_file)} ...", "#0000aa")
@@ -701,7 +708,9 @@ class SetupGUI(QMainWindow):
         self.hide()
         editor.show()
         self.show()
-        self._set_status("State editor closed. Results saved to output folder.", OK_GREEN)
+        self._autodetect_prev()      # offer the just-saved results for resuming
+        self._set_status("State editor closed. Results saved to the 'results' "
+                         "subfolder of the LFP folder.", OK_GREEN)
 
     def _buzsaki_labels(self, chs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).

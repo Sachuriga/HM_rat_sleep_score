@@ -7,10 +7,17 @@ bounds.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
 interoperates with the original MATLAB toolkit.
 
 State codes:  0 none, 1 awake, 2 light/drowsy, 3 NREM, 4 intermediate, 5 REM.
+Every bin starts as NREM (3) by default, so scoring means re-labelling the
+non-NREM stretches rather than covering the whole recording.
+
+On launch the editor asks who is scoring ("Labeled by"); on close it saves the
+scoring automatically to a ``results/`` subfolder of the input folder as
+``results_<date>_<name>.npz`` / ``.mat``.
 """
 
 from __future__ import annotations
 
+import datetime as _datetime
 import os
 
 import numpy as np
@@ -31,6 +38,7 @@ try:
     from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QMessageBox,
                                  QToolBar, QFileDialog, QSlider, QComboBox,
+                                 QInputDialog,
                                  QWidget as _QWidget, QSizePolicy as _QSizePolicy,
                                  QPushButton as _QPushButton, QLabel as _QLabel)
     _HAVE_QT = True
@@ -48,6 +56,7 @@ STATE_COLORS = {
 }
 STATE_NAMES = {0: "none", 1: "awake", 2: "light/drowsy",
                3: "NREM", 4: "intermediate", 5: "REM"}
+DEFAULT_STATE = 3     # every bin starts as NREM; scoring re-labels the rest
 
 MAX_FREQ = 60.0       # default visible frequency extent (Hz)
 HANNING_W = 10        # temporal smoothing window for the spectrogram
@@ -118,8 +127,8 @@ if _HAVE_QT:
     class _EditorWindow(QMainWindow):
         """Top-level Qt window hosting the editor's matplotlib canvas.
 
-        Closing it runs the editor's unsaved-changes prompt and stops the nested
-        event loop that ``StateEditor.show()`` spins."""
+        Closing it auto-saves the scoring to the results folder and stops the
+        nested event loop that ``StateEditor.show()`` spins."""
 
         def __init__(self, editor):
             super().__init__()
@@ -140,10 +149,14 @@ class StateEditor:
     def __init__(self, base_name, specs, fos, to, motion, raw_eeg, eeg_fs,
                  out_folder=".", states=None, chs=None, ch_labels=None,
                  auto_states=None, auto_states_ts=None,
-                 auto_label="Auto", overlays=None):
+                 auto_label="Auto", overlays=None,
+                 labeled_by=None, results_folder=None):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
+        # Auto-save on close goes here (results/ inside the input folder).
+        self.results_folder = results_folder or os.path.join(out_folder, "results")
+        self.labeled_by = labeled_by       # scorer name, asked on launch if unset
         self.n_ch = len(specs)
         self.chs = list(chs) if chs is not None else list(range(1, self.n_ch + 1))
         # Anatomical panel names (cortex / EEG / pyr) resolved from
@@ -153,7 +166,8 @@ class StateEditor:
         self.lims = (float(self.to[0]), float(self.to[-1]))
         self.n_bins = self.to.size
 
-        self.states = (np.zeros(self.n_bins, dtype=int) if states is None
+        self.states = (np.full(self.n_bins, DEFAULT_STATE, dtype=int)
+                       if states is None
                        else np.asarray(states, dtype=int).copy())
         self.history = []          # for undo
 
@@ -798,19 +812,21 @@ class StateEditor:
         self.fig.canvas.draw_idle()
 
     def _confirm_close(self):
-        """Return True if the window may close, prompting to save when dirty.
+        """Auto-save the scoring to the results folder, then allow the close.
 
-        Called from ``_EditorWindow.closeEvent``. Cancel keeps the window open."""
-        if not self.dirty or not _HAVE_QT or self.win is None:
+        Called from ``_EditorWindow.closeEvent``. If the save fails the user is
+        asked whether to close anyway (No keeps the window open)."""
+        if not _HAVE_QT or self.win is None:
             return True
-        resp = QMessageBox.question(
-            self.win, "Unsaved changes", "Save state scoring before closing?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel)
-        if resp == QMessageBox.StandardButton.Cancel:
-            return False
-        if resp == QMessageBox.StandardButton.Yes:
-            self.save_states()
+        try:
+            self.save_results()
+        except Exception as exc:
+            resp = QMessageBox.question(
+                self.win, "Save failed",
+                f"Could not save results:\n{exc}\n\nClose anyway (scoring will "
+                f"be lost)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            return resp == QMessageBox.StandardButton.Yes
         return True
 
     def _mark_dirty(self):
@@ -1289,6 +1305,35 @@ class StateEditor:
         self._set_title()
         return path
 
+    def save_results(self):
+        """Save the scoring to ``<results_folder>/results_<date>_<name>``.
+
+        Written automatically when the editor window closes: both a NumPy
+        ``.npz`` (resumable) and a MATLAB ``.mat``, stamped with the scoring
+        date and the "Labeled by" name given on launch."""
+        os.makedirs(self.results_folder, exist_ok=True)
+        name = "_".join((self.labeled_by or "unknown").split()) or "unknown"
+        stem = f"results_{_datetime.date.today().isoformat()}_{name}"
+        events = (np.array(self.events, dtype=float) if self.events
+                  else np.zeros((0, 2)))
+        transitions = self._compute_transitions()
+        npz_path = os.path.join(self.results_folder, stem + ".npz")
+        np.savez(npz_path,
+                 states=self.states.astype(int),
+                 timestamps=self.to.astype(float),
+                 events=events,
+                 transitions=transitions,
+                 labeled_by=np.array(self.labeled_by or "unknown"))
+        mat_path = os.path.join(self.results_folder, stem + ".mat")
+        savemat(mat_path, {"states": self.states.astype(float).reshape(1, -1),
+                           "events": events,
+                           "transitions": transitions,
+                           "labeled_by": self.labeled_by or "unknown"})
+        print(f"Saved results to {npz_path} (+ .mat)")
+        self.dirty = False
+        self._set_title()
+        return npz_path
+
     def _compute_transitions(self):
         """Nx3 [state, start_s, end_s] from contiguous runs (MATLAB format)."""
         rows = []
@@ -1330,18 +1375,37 @@ class StateEditor:
                 self._refresh_events()
                 print(f"Loaded {len(self.events)} events")
 
+    def _prompt_labeled_by(self):
+        """Modal "Labeled by" prompt shown on launch. The name is required — it
+        goes into the auto-saved results filename. Returns False on Cancel."""
+        while True:
+            name, ok = QInputDialog.getText(
+                self.win, "Labeled by",
+                "Who is scoring this session?\n"
+                "(used in the saved results filename)")
+            if not ok:
+                return False
+            name = name.strip()
+            if name:
+                self.labeled_by = name
+                return True
+
     def show(self):
         """Show the editor window and block until it is closed.
 
-        Uses a nested Qt event loop so a caller (the setup GUI) can invoke this
-        synchronously from within the already-running application loop, the same
-        way ``QDialog.exec()`` blocks. No-op when built headlessly."""
+        Asks for the scorer's name ("Labeled by") first — cancelling that
+        prompt aborts opening the editor. Uses a nested Qt event loop so a
+        caller (the setup GUI) can invoke this synchronously from within the
+        already-running application loop, the same way ``QDialog.exec()``
+        blocks. No-op when built headlessly."""
         if self.win is None:
             return
         owns_app = False
         if QApplication.instance() is None:         # standalone use
             self._app = QApplication([])
             owns_app = True
+        if self.labeled_by is None and not self._prompt_labeled_by():
+            return                                  # cancelled — don't open
         self.win.show()
         self.win.raise_()
         self.win.activateWindow()

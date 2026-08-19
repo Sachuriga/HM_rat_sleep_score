@@ -48,13 +48,14 @@ print(f"motion bins {motion.size}, spectrogram bins {to.size}")
 
 # Build the editor headlessly and exercise scoring/save/load/transitions
 ed = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+assert (ed.states == 3).all(), "bins should default to NREM"
 ed._apply_state(10, 25, 3)     # NREM 10-25 s
 ed._apply_state(40, 55, 5)     # REM  40-55 s
 ed._apply_state(60, 70, 1)     # awake
 assert (ed.states[10:26] == 3).all()
 assert (ed.states[40:56] == 5).all()
 ed._undo()                     # undoes the awake block
-assert (ed.states[60:71] == 0).all()
+assert (ed.states[60:71] == 3).all()   # back to the NREM default
 
 path = "/tmp/test-states.mat"
 ed.save_states(path)
@@ -67,5 +68,15 @@ assert d["states"].ravel().size == to.size
 ed.states[:] = 0
 ed.load_states(path)
 assert (ed.states[10:26] == 3).all(), "load round-trip failed"
+
+# Auto-saved results file (what closing the editor window writes)
+ed.labeled_by = "Test User"
+rpath = ed.save_results()
+assert os.path.isfile(rpath) and os.path.basename(os.path.dirname(rpath)) == "results"
+assert "_Test_User" in os.path.basename(rpath)
+d = np.load(rpath)
+assert str(d["labeled_by"]) == "Test User"
+assert d["states"].size == to.size
+print(f"results auto-save ok: {rpath}")
 
 print("\nALL CHECKS PASSED")
