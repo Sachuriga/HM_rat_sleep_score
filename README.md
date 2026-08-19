@@ -20,17 +20,35 @@ Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
 
 ## Install
 
-From the project root, in your Python environment:
+Two one-time steps per machine.
+
+**1. Install the package** into a conda environment (any name — it differs per
+PC and that's fine):
 
 ```bash
-pip install -e .
+conda activate <your-env>
+pip install -e .          # from the project root
 ```
 
-This installs the `sleepscore` command. Because it's an editable install, edits
-to the code under `python/` take effect immediately (no reinstall needed).
+Because it's an editable install, edits to the code under `python/` take
+effect immediately (no reinstall needed). If you later **move the repo
+folder**, rerun `pip install -e .` from the new location.
+
+**2. Put the launcher on your PATH** so `sleepscore` works from any folder
+*without* activating conda first — add to `~/.zshrc` (or `~/.bashrc`):
+
+```bash
+export PATH="$PATH:/path/to/HM_rat_sleep_score/bin"
+```
+
+`bin/sleepscore` auto-discovers whichever conda env has the package installed
+(checking, in order: `$SLEEPSCORE_CONDA_ENV` if set, the active env, then all
+envs of every conda/mamba install) and runs the GUI with that env's Python —
+so nothing is hardcoded to one machine's env name. `sleepscore --which` prints
+the env it would use.
 
 **Requirements:** Python ≥ 3.9, `PyQt6`, `numpy`, `scipy`, `matplotlib`
-(installed automatically by the command above).
+(installed automatically by `pip install -e .`).
 
 ## Usage
 

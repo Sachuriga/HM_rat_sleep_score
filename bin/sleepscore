@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Launch the sleep-scoring GUI from any folder, on any machine, without
+# activating conda first.
+#
+# The conda env name differs between PCs, so this doesn't hardcode one: it
+# finds the environment where the package was installed (`pip install -e .`)
+# by looking for that env's `sleepscore` entry point, and runs it with the
+# env's own Python — equivalent to activating the env first.
+#
+# Search order:
+#   1. $SLEEPSCORE_CONDA_ENV        (set this to force a specific env name)
+#   2. the currently active env     ($CONDA_PREFIX)
+#   3. every env of every conda/mamba install found on this machine
+#
+#   sleepscore --which    print which env's command would run, don't launch
+set -euo pipefail
+
+# Conda roots to scan: `conda info --base` when conda is on PATH, plus the
+# usual install locations (covers shells where conda isn't initialised).
+roots=()
+if command -v conda >/dev/null 2>&1; then
+    base=$(conda info --base 2>/dev/null) && roots+=("$base")
+fi
+for r in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/mambaforge" \
+         "$HOME/miniforge3" /opt/miniconda3 /opt/anaconda3 /opt/homebrew/Caskroom/miniconda/base; do
+    [[ -d $r ]] && roots+=("$r")
+done
+
+works() {
+    # A candidate must actually import — a leftover editable install pointing
+    # at a moved/deleted repo checkout has the command but a broken import.
+    local py="${1%/*}/python"
+    [[ -x $1 && -x $py ]] && "$py" -c "import sleepscore" >/dev/null 2>&1
+}
+
+find_cmd() {
+    local root c
+    if [[ -n "${SLEEPSCORE_CONDA_ENV:-}" ]]; then
+        for root in "${roots[@]}"; do
+            c="$root/envs/$SLEEPSCORE_CONDA_ENV/bin/sleepscore"
+            works "$c" && { echo "$c"; return 0; }
+        done
+        echo "sleepscore: no working 'sleepscore' command in conda env" \
+             "'$SLEEPSCORE_CONDA_ENV' — run 'pip install -e .' there first" >&2
+        return 1
+    fi
+    if [[ -n "${CONDA_PREFIX:-}" ]] && works "$CONDA_PREFIX/bin/sleepscore"; then
+        echo "$CONDA_PREFIX/bin/sleepscore"; return 0
+    fi
+    for root in "${roots[@]}"; do
+        for c in "$root"/envs/*/bin/sleepscore "$root/bin/sleepscore"; do
+            works "$c" && { echo "$c"; return 0; }
+        done
+    done
+    echo "sleepscore: no conda env with a working install found." >&2
+    echo "  Install it once with:  conda activate <your-env> && pip install -e $(cd "$(dirname "$0")/.." && pwd)" >&2
+    return 1
+}
+
+cmd=$(find_cmd)
+if [[ "${1:-}" == "--which" ]]; then
+    echo "$cmd"
+    exit 0
+fi
+exec "$cmd" "$@"
