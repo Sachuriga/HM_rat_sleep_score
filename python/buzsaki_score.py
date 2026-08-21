@@ -1,23 +1,26 @@
 """Buzsáki automatic sleep scoring (WAKE / NREM / REM) from LFP + EMG.
 
-A Python port of the Buzsáki lab ``SleepScoreMaster`` / ``ClusterStates`` pipeline
-(Watson et al. 2016), using the power-spectrum-slope (PSS) metrics from
-``anjal_sleepscore`` (``compute_delta_/compute_theta_buzsakiMethod.m``) and the
-EMG-from-LFP signal produced by the tracker's step 8.
+A Python port of the brain-state segregation in Watson, Levenstein, Greene,
+Gelinas & Buzsáki (2016, Neuron 90:839–852, "Network Homeostasis and State
+Dynamics of Neocortical Sleep"), using the EMG-from-LFP signal produced by the
+tracker's step 8.
 
-Three metrics, one value per 1 s bin:
-  * broadbandSlowWave = log delta-band (0.5–4 Hz) power (NREM has strong delta,
-    so higher = more NREM; drops in theta-dominated REM and desynchronised WAKE).
-  * thratio           = peak oscillatory residual over 5–10 Hz (theta).
-  * EMG               = EMG-from-LFP (muscle tone).
+Three metrics, one value per 1 s bin (each smoothed, 0–1 normalised, and
+thresholded at the dip of its bimodal histogram, per session — the paper's
+"cutoffs at the minima of bimodal distributions"):
+  * broadbandSlowWave = delta-vs-gamma contrast of the log spectrogram
+    (z-scored delta power minus z-scored gamma power — the axis the paper's
+    spectrogram PC1 captures: low frequencies weighted opposite in sign to
+    gamma; its high mode is NREM).
+  * thratio           = narrow-band theta power ratio, 5–10 Hz / 2–16 Hz.
+  * EMG               = EMG-from-LFP (muscle tone), and/or accelerometer motion.
 
-Each is smoothed, 0–1 normalised, thresholded at its bimodal-histogram dip, then
-classified by an EMG-first decision tree (movement splits wake/sleep first, then
-the slow-wave/theta metrics split sleep into NREM/REM):
-  WAKE  = EMG > emgthresh                         (movement)
-  REM   = ~WAKE & theta > ththresh & SW <= swthresh
-  NREM  = ~WAKE & ~REM                            (all other sleep)
-(without EMG it falls back to slow-wave-first: NREM = SW > swthresh.)
+Classified in the paper's order — slow waves first, then theta/EMG:
+  NREM  = SW > swthresh                            (high-PC1 mode)
+  REM   = ~NREM & theta > ththresh & EMG/motion quiescent
+  WAKE  = everything else (movement, microarousals, quiet wake)
+Only these three states are produced; the paper's microarousals and any
+transitional/intermediate substates are folded into WAKE.
 
 States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 """
@@ -32,16 +35,16 @@ from scipy.signal import spectrogram
 from scipy.ndimage import uniform_filter1d
 
 # HM state codes (match TheStateEditor / the Python state editor).
-WAKE, LIGHT, NREM, INTER, REM = 1, 2, 3, 4, 5
+WAKE, NREM, REM = 1, 3, 5
 
 DELTA_BAND = (0.5, 4.0)      # slow-wave (delta) power band (Hz)
-TH_FRANGE = (2.0, 20.0)      # theta 1/f fit range (Hz)
+GAMMA_BAND = (40.0, 100.0)   # gamma band, weighted opposite to delta (Hz)
 TH_BAND = (5.0, 10.0)        # theta band (Hz)
+TH_DENOM = (2.0, 16.0)       # theta-ratio denominator band (Hz)
 WINDOW_S = 2.0              # spectrogram window (s)
 DT_S = 1.0                 # spectrogram step / bin size (s)
 SMOOTH_S = 15.0            # metric smoothing window (s)
 TH_THRESH_FACTOR = 0.85    # lower the theta threshold (<1) to accept more REM
-DROWSY_FRAC = 0.7          # movement in [DROWSY_FRAC*wake_thr, wake_thr) -> drowsy
 
 
 # ---------------------------------------------------------------------------- #
@@ -55,20 +58,6 @@ def _spectrogram(lfp, fs):
                             nperseg=nperseg, noverlap=noverlap,
                             scaling="density", mode="psd")
     return f, t, Sxx
-
-
-def _loglog_fit(logf, logP):
-    """Per-time-bin OLS line fit of logP (F×T) vs logf (F). Returns slope, resid.
-
-    slope[t], and resid[F, t] = logP - (intercept + slope*logf). Vectorised over t.
-    """
-    x = logf - logf.mean()
-    denom = np.sum(x ** 2)
-    ybar = logP.mean(axis=0, keepdims=True)
-    slope = (x[:, None] * (logP - ybar)).sum(axis=0) / denom
-    intercept = ybar[0] - slope * logf.mean()
-    fit = intercept[None, :] + slope[None, :] * logf[:, None]
-    return slope, logP - fit
 
 
 def _smooth(x, fs_bins):
@@ -92,32 +81,35 @@ def _zscore(x):
 
 
 def _sw_metric(lfp, fs):
-    """broadbandSlowWave (0–1 per 1 s bin) = log delta-band (0.5–4 Hz) power.
+    """broadbandSlowWave (0–1 per 1 s bin) = delta-vs-gamma spectrogram contrast.
 
-    Delta-only rather than the 4–90 Hz power-spectrum slope: the slope band
-    includes theta, so REM theta inflated it and REM epochs stayed above the NREM
-    threshold (never dropping into the low-SW cluster). Delta power drops in REM
-    (theta-dominated) and in WAKE (desynchronised), so it cleanly separates NREM.
+    Implements the axis the paper's spectrogram PC1 captures — power at low
+    frequencies weighted opposite in sign to the gamma range (Watson et al.
+    2016, Fig. 1) — as z-scored log delta power minus z-scored log gamma power.
+    Computing the contrast directly instead of a per-session PCA keeps the
+    metric's sign and meaning fixed even when movement/broadband artifacts
+    dominate the spectrogram's variance (a broadband power rise lifts both
+    terms and cancels). High in NREM; low in theta-dominated REM and in
+    desynchronised, gamma-rich WAKE.
     Cleanest from a CORTEX channel. Returns (times, sw, fs_bins)."""
     f, t, Sxx = _spectrogram(lfp, fs)
     fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
-    m = (f >= DELTA_BAND[0]) & (f <= DELTA_BAND[1])
-    delta = np.log10(Sxx[m, :].mean(axis=0) + 1e-12)
-    return t, _norm01(_smooth(delta, fs_bins)), fs_bins
+    logP = np.log10(Sxx + 1e-12)
+    delta = logP[(f >= DELTA_BAND[0]) & (f <= DELTA_BAND[1]), :].mean(axis=0)
+    gamma = logP[(f >= GAMMA_BAND[0]) & (f <= GAMMA_BAND[1]), :].mean(axis=0)
+    sw = _zscore(delta) - _zscore(gamma)
+    return t, _norm01(_smooth(sw, fs_bins)), fs_bins
 
 
 def _theta_metric(lfp, fs):
-    """thratio (0–1 per 1 s bin) = peak oscillatory residual over 5–10 Hz.
+    """thratio (0–1 per 1 s bin) = narrow-band theta power ratio,
+    power(5–10 Hz) / power(2–16 Hz) (Watson et al. 2016).
     Strongest from a STRATUM RADIATUM channel (theta peaks there in REM)."""
     f, t, Sxx = _spectrogram(lfp, fs)
-    logf = np.log10(f + 1e-12)
-    logP = np.log10(Sxx + 1e-12)
     fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
-    m = (f >= TH_FRANGE[0]) & (f <= TH_FRANGE[1])
-    _, resid = _loglog_fit(logf[m], logP[m, :])
-    fth = f[m]
-    tband = (fth >= TH_BAND[0]) & (fth <= TH_BAND[1])
-    thratio = np.clip(resid[tband, :], 0, None).max(axis=0)
+    num = (f >= TH_BAND[0]) & (f <= TH_BAND[1])
+    den = (f >= TH_DENOM[0]) & (f <= TH_DENOM[1])
+    thratio = Sxx[num, :].sum(axis=0) / (Sxx[den, :].sum(axis=0) + 1e-24)
     return t, _norm01(_smooth(thratio, fs_bins))
 
 
@@ -152,12 +144,18 @@ def compute_metrics(lfp, fs, emg=None, emg_ts=None, theta_lfp=None):
 # ---------------------------------------------------------------------------- #
 #  Bimodal threshold + clustering
 # ---------------------------------------------------------------------------- #
-def bimodal_threshold(x, nbins=60, default=0.5):
+def bimodal_threshold(x, nbins=60, default=0.5, mode="dip"):
     """Threshold at the histogram dip between the two largest modes.
 
     Mirrors the intent of ``bz_BimodalThresh``: smooth the histogram, find the two
     tallest peaks, and put the threshold at the lowest trough between them. Falls
     back to ``default`` (on the 0–1 metric) when the distribution isn't bimodal.
+
+    ``mode="high"`` bounds the HIGH mode instead: when a significant third mode
+    sits between the two tallest peaks (e.g. REM on the slow-wave metric, between
+    the WAKE-low and NREM-high modes), the threshold moves to the trough directly
+    below the high mode so the middle mode is not swallowed into it. On a cleanly
+    bimodal distribution it is identical to ``"dip"``.
     """
     x = np.asarray(x, dtype=np.float64)
     x = x[~np.isnan(x)]
@@ -170,66 +168,61 @@ def bimodal_threshold(x, nbins=60, default=0.5):
     peaks = [i for i in range(1, len(h) - 1) if h[i] > h[i - 1] and h[i] >= h[i + 1]]
     if len(peaks) < 2:
         return default
-    peaks.sort(key=lambda i: h[i], reverse=True)
-    p1, p2 = sorted(peaks[:2])
+    tallest = sorted(peaks, key=lambda i: h[i], reverse=True)
+    p1, p2 = sorted(tallest[:2])
+    if mode == "high":
+        # significant intermediate modes (≥25% of the smaller top peak; tiny
+        # noise bumps in an empty gap don't count) pull the threshold up to
+        # the trough adjacent to the high mode
+        sig = 0.25 * min(h[p1], h[p2])
+        mid = [i for i in peaks if p1 < i < p2 and h[i] >= sig]
+        if mid:
+            p1 = max(mid)
     trough = p1 + int(np.argmin(h[p1:p2 + 1]))
     return float(centres[trough])
 
 
 def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
                    emgthresh=None, sw_factor=1.0, th_factor=TH_THRESH_FACTOR,
-                   emg_factor=1.0, drowsy_frac=DROWSY_FRAC, sticky=True):
-    """Classify each 1 s bin into WAKE/NREM/INTER/REM by a movement-first tree.
+                   emg_factor=1.0):
+    """Classify each 1 s bin into WAKE/NREM/REM (Watson et al. 2016 order).
 
-    Movement (accelerometer ``motion`` when given, else EMG-from-LFP ``emg``)
-    is 3-level: high -> WAKE, moderate -> LIGHT (drowsy), quiescent -> SLEEP.
-    Within SLEEP the slow-wave/theta metrics split it:
-      * REM   = theta, no slow waves
-      * INTER = theta AND slow waves (intermediate / transition sleep)
-      * NREM  = slow waves / quiescent (no theta)
+    The slow-wave metric's bimodal split labels NREM first; among the remaining
+    bins, high theta with quiescent EMG/motion is REM; everything else —
+    movement, microarousals, quiet wake — is WAKE:
+      NREM = SW > swthresh
+      REM  = ~NREM & theta > ththresh & every movement signal below threshold
+      WAKE = the rest
+    Without any movement signal, theta alone gates REM (over-calls REM — supply
+    EMG or motion for a proper split).
 
     Each auto (bimodal) threshold is scaled by its ``*_factor`` (1.0 = auto;
-    <1 = more permissive). ``drowsy_frac`` sets the moderate-movement band width.
+    th_factor <1 = more REM; emg_factor >1 = laxer movement gate on REM).
     Returns ``(states, thresholds)``.
     """
     n = len(sw)
-    swt = bimodal_threshold(sw) * sw_factor if swthresh is None else swthresh
+    # NREM = the HIGH mode of the slow-wave metric: bound it from directly
+    # below so a middle (REM) mode is not swallowed into NREM
+    swt = (bimodal_threshold(sw, mode="high") * sw_factor
+           if swthresh is None else swthresh)
     # th_factor (<1) lowers the theta threshold so more borderline bins are REM
     tht = bimodal_threshold(thratio) * th_factor if ththresh is None else ththresh
-    highsw = sw > swt
+    nrem = sw > swt
     hightheta = thratio > tht
 
-    states = np.zeros(n, dtype=int)
-    # Three-level movement: WAKE = high (EITHER EMG or motion in its own high mode,
-    # so high-EMG can't be masked); LIGHT/DROWSY = moderate combined movement;
-    # SLEEP = quiescent. Within SLEEP the (slow-wave × theta) 2×2 gives NREM/REM/INTER.
     movesigs = [np.asarray(s, dtype=np.float64) for s in (emg, motion) if s is not None]
+    quiet = np.ones(n, dtype=bool)
+    movt = None
     if movesigs:
         thrs = [bimodal_threshold(s) * emg_factor if emgthresh is None else emgthresh
                 for s in movesigs]
-        highmotion = np.zeros(n, dtype=bool)   # WAKE: any signal at wake level
-        somemove = np.zeros(n, dtype=bool)     # any signal in the drowsy band+
         for s, thv in zip(movesigs, thrs):
-            highmotion |= s > thv
-            somemove |= s > drowsy_frac * thv
+            quiet &= s < thv                  # REM needs EVERY signal quiescent
         movt = thrs[0]
-        drowsy = somemove & (~highmotion)             # moderate movement -> drowsy
-        sleep = ~somemove                             # quiescent -> asleep
-        rem = sleep & hightheta & (~highsw)           # theta, no slow waves
-        inter = sleep & hightheta & highsw            # theta + slow waves
-        nrem = sleep & (~hightheta)                   # slow-wave / quiescent NREM
-        states[highmotion] = WAKE
-        states[drowsy] = LIGHT
-        states[nrem] = NREM
-        states[inter] = INTER
-        states[rem] = REM
-    else:
-        # no movement signal at all: fall back to a slow-wave/theta 2×2
-        movt = None
-        states[highsw & ~hightheta] = NREM
-        states[highsw & hightheta] = INTER
-        states[~highsw & hightheta] = REM
-        states[~highsw & ~hightheta] = WAKE
+
+    states = np.full(n, WAKE, dtype=int)
+    states[nrem] = NREM
+    states[(~nrem) & hightheta & quiet] = REM
     return states, {"swthresh": swt, "ththresh": tht, "emgthresh": movt}
 
 
@@ -272,16 +265,15 @@ def enforce_min_duration(states, min_secs=6, dt=1.0):
 # ---------------------------------------------------------------------------- #
 def score(lfp, fs, emg=None, emg_ts=None, motion=None, motion_ts=None, min_secs=10,
           swthresh=None, ththresh=None, emgthresh=None, sw_factor=1.0,
-          th_factor=TH_THRESH_FACTOR, emg_factor=1.0, drowsy_frac=DROWSY_FRAC,
-          theta_lfp=None):
+          th_factor=TH_THRESH_FACTOR, emg_factor=1.0, theta_lfp=None):
     """Full Buzsáki auto-scoring. Returns a dict with states, timestamps, metrics.
 
     ``lfp`` = slow-wave (cortex) channel; ``theta_lfp`` = optional theta
     (stratum radiatum) channel — pass both for layer-specific scoring. ``motion``
-    (accelerometer) drives the wake/sleep split when given, else ``emg`` does.
+    (accelerometer) and/or ``emg`` gate REM on movement quiescence.
     ``sw_factor`` / ``th_factor`` / ``emg_factor`` scale the auto thresholds
-    (1.0 = auto), ``drowsy_frac`` sets the drowsy band, ``min_secs`` the minimum
-    epoch. ``states`` is one HM code per 1 s bin; ``timestamps`` bin centres (s).
+    (1.0 = auto), ``min_secs`` the minimum epoch. ``states`` is one HM code
+    (1 WAKE / 3 NREM / 5 REM) per 1 s bin; ``timestamps`` bin centres (s).
     """
     t, sw, thratio, emg_a = compute_metrics(lfp, fs, emg=emg, emg_ts=emg_ts,
                                             theta_lfp=theta_lfp)
@@ -294,8 +286,7 @@ def score(lfp, fs, emg=None, emg_ts=None, motion=None, motion_ts=None, min_secs=
     states, thr = cluster_states(sw, thratio, emg_a, motion=motion_a,
                                  swthresh=swthresh, ththresh=ththresh,
                                  emgthresh=emgthresh, sw_factor=sw_factor,
-                                 th_factor=th_factor, emg_factor=emg_factor,
-                                 drowsy_frac=drowsy_frac)
+                                 th_factor=th_factor, emg_factor=emg_factor)
     dt = np.median(np.diff(t)) if t.size > 1 else DT_S
     if min_secs:
         states = enforce_min_duration(states, min_secs=min_secs, dt=dt)
@@ -419,8 +410,8 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     src_name = ("motion+EMG" if (motion is not None and emg is not None)
                 else "motion" if motion is not None
                 else "EMG" if emg is not None
-                else "slow-wave only (no EMG/motion)")
-    print(f"  wake/sleep split from: {src_name}")
+                else "none (theta only — REM may be over-called)")
+    print(f"  REM movement gate from: {src_name}")
     return score(lfp, fs, emg=emg, emg_ts=emg_ts, motion=motion, motion_ts=motion_ts,
                  theta_lfp=theta_lfp, **kw), sw_ch
 
@@ -451,7 +442,7 @@ def main():
 
     st = res["states"]
     total = st.size or 1
-    names = {WAKE: "WAKE", LIGHT: "LIGHT", NREM: "NREM", INTER: "INTER", REM: "REM"}
+    names = {WAKE: "WAKE", NREM: "NREM", REM: "REM"}
     print(f"Scored channel {ch}: {st.size} bins")
     for code, name in names.items():
         pct = 100.0 * np.count_nonzero(st == code) / total

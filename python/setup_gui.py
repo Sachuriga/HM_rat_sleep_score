@@ -345,13 +345,12 @@ class SetupGUI(QMainWindow):
         self.thr_grid.setVerticalSpacing(4)
         self.swf_edit = QLineEdit("1.0")
         self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
-        self.emgf_edit = QLineEdit("2.2")
-        self.drowsy_edit = QLineEdit("0.8")
+        self.emgf_edit = QLineEdit("1.0")
         self.minsec_edit = QLineEdit("10")
         fields = [("SW×  (NREM)", self.swf_edit, "Slow-wave threshold multiplier. ↓ = more NREM."),
                   ("θ×  (REM)", self.thf_edit, "Theta threshold multiplier. ↓ = more REM."),
-                  ("EMG×  (wake)", self.emgf_edit, "EMG threshold multiplier. ↓ = more wake."),
-                  ("drowsy", self.drowsy_edit, "Width of the drowsy/light band."),
+                  ("EMG×  (REM gate)", self.emgf_edit,
+                   "Movement ceiling for REM: bins with EMG/motion above it can't be REM. ↑ = more REM."),
                   ("min ep (s)", self.minsec_edit, "Shortest epoch kept, in seconds.")]
         for i, (lbl, edit, tip) in enumerate(fields):
             head = self._field_label(lbl)
@@ -363,7 +362,7 @@ class SetupGUI(QMainWindow):
             self.thr_grid.addWidget(edit, 1, i, Qt.AlignmentFlag.AlignHCenter)
         box3.addLayout(self.thr_grid)
         box3.addWidget(self._hint(
-            "1.0 = automatic threshold  ·  ↓SW → more sleep  ·  ↓θ → more REM  ·  ↓EMG → more wake"))
+            "1.0 = automatic threshold  ·  ↓SW → more NREM  ·  ↓θ → more REM  ·  ↑EMG → laxer REM gate"))
         v.addWidget(c3)
         v.addStretch(1)
 
@@ -402,7 +401,7 @@ class SetupGUI(QMainWindow):
 
     def _toggle_thresholds(self, on):
         for e in (self.swf_edit, self.thf_edit, self.emgf_edit,
-                  self.drowsy_edit, self.minsec_edit):
+                  self.minsec_edit):
             e.setEnabled(on)
 
     def _update_ready(self):
@@ -730,7 +729,6 @@ class SetupGUI(QMainWindow):
         kw = dict(sw_factor=_f(self.swf_edit, 1.0),
                   th_factor=_f(self.thf_edit, bz.TH_THRESH_FACTOR),
                   emg_factor=_f(self.emgf_edit, 1.0),
-                  drowsy_frac=_f(self.drowsy_edit, bz.DROWSY_FRAC),
                   min_secs=_f(self.minsec_edit, 10.0))
         try:
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")

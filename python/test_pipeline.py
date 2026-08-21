@@ -79,4 +79,19 @@ assert str(d["labeled_by"]) == "Test User"
 assert d["states"].size == to.size
 print(f"results auto-save ok: {rpath}")
 
+# Buzsáki 3-state tree (Watson et al. 2016): NREM by slow waves first, REM by
+# theta among quiet non-NREM bins, everything else (incl. movement) WAKE.
+import buzsaki_score as bz
+sw_m    = np.array([0.9, 0.9, 0.1, 0.1, 0.1, 0.9])
+theta_m = np.array([0.1, 0.1, 0.9, 0.9, 0.1, 0.1])
+emg_m   = np.array([0.1, 0.1, 0.1, 0.9, 0.9, 0.1])
+st, thr = bz.cluster_states(sw_m, theta_m, emg_m,
+                            swthresh=0.5, ththresh=0.5, emgthresh=0.5)
+#            NREM      NREM      REM     WAKE(mov)  WAKE     NREM(SW wins)
+assert st.tolist() == [bz.NREM, bz.NREM, bz.REM, bz.WAKE, bz.WAKE, bz.NREM]
+# legacy 5-state files: light/drowsy (2) -> awake, intermediate (4) -> NREM
+from state_editor import sanitize_states
+assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 3, 5]
+print("Buzsáki 3-state clustering + legacy-code mapping ok")
+
 print("\nALL CHECKS PASSED")

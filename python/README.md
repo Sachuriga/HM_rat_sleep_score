@@ -8,10 +8,12 @@ whitened multitaper spectrograms, and score sleep states by hand.
 |------|-------|
 | 0 | No state |
 | 1 | Awake |
-| 2 | Light / Drowsy |
 | 3 | NREM |
-| 4 | Intermediate |
 | 5 | REM |
+
+Only the three states of Watson et al. (2016, *Neuron*) are scored. The legacy
+codes 2 (light/drowsy) and 4 (intermediate) are gone; files containing them
+are mapped on load (2 → awake, 4 → NREM).
 
 ## Requirements
 
@@ -78,7 +80,7 @@ channels or the sampling rate).
 
 | Key | Action |
 |-----|--------|
-| `0`–`5` | Arm a state, then click the two time bounds on any spectrogram/motion/state panel |
+| `1`–`3` (awake/NREM/REM, `0` = erase) | Arm a state, then click the two time bounds on any spectrogram/motion/state panel |
 | `c` | Cancel the current state action |
 | Left / Right | Pan the view |
 | Home / End | Jump to the start / end of the recording |
@@ -109,7 +111,7 @@ files are interchangeable with the MATLAB toolkit:
 
 | Field | Description |
 |-------|-------------|
-| `states` | `1×N` vector (N = number of 1 s bins), values 0–5 |
+| `states` | `1×N` vector (N = number of 1 s bins), values 0/1/3/5 |
 | `events` | `M×2` matrix of `[event_number, time_s]` (empty when no events placed) |
 | `transitions` | `N×3` `[state, start_s, end_s]` for each contiguous scored run |
 
@@ -134,19 +136,22 @@ dynamic range of channel 1 — matching `TheStateEditor.m`.
 
 ## Buzsáki automatic scoring (optional)
 
-`buzsaki_score.py` is a Python port of the Buzsáki `SleepScoreMaster` / `ClusterStates`
-pipeline (Watson et al. 2016). It labels each 1 s bin **WAKE / NREM / REM** from
-three metrics — all 0–1 normalised, each split at its bimodal-histogram dip:
+`buzsaki_score.py` is a Python port of the brain-state segregation in Watson et
+al. (2016, *Neuron* 90:839–852). It labels each 1 s bin **WAKE / NREM / REM**
+from three metrics — all 0–1 normalised, each split at its bimodal-histogram dip
+(the paper's per-session bimodal cutoffs):
 
 | Metric | How | Separates |
 |--------|-----|-----------|
-| broadband slow wave | −slope of the log-log power spectrum over 4–90 Hz | NREM (steep 1/f) |
-| theta ratio | peak oscillatory residual over 5–10 Hz | REM |
-| EMG | EMG-from-LFP (tracker step 8), or a provided motion signal | WAKE vs sleep |
+| broadband slow wave | delta (0.5–4 Hz) minus gamma (40–100 Hz) z-scored log power — the paper's PC1 axis (low freqs weighted opposite gamma) | NREM (high mode) |
+| theta ratio | narrow-band power ratio 5–10 Hz / 2–16 Hz | REM |
+| EMG | EMG-from-LFP (tracker step 8), and/or a provided motion signal | movement gate on REM |
 
-`NREM = SW>thr`; `REM = ~NREM & EMG<thr & theta>thr`; `WAKE` = the rest. Without an
-EMG signal the REM/WAKE split uses theta only (REM tends to be over-called — supply
-`emg_from_lfp*.npy` for a proper split).
+Classified in the paper's order: `NREM = SW>thr`; `REM = ~NREM & theta>thr &
+EMG<thr`; `WAKE` = the rest (movement, microarousals and quiet wake all count
+as WAKE — no intermediate states). Without an EMG/motion signal the REM gate
+uses theta only (REM tends to be over-called — supply `emg_from_lfp*.npy` for
+a proper split).
 
 Generate labels for a folder:
 

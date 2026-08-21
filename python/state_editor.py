@@ -2,11 +2,14 @@
 
 Displays, for up to three LFP channels, a whitened multitaper spectrogram, a
 motion/EMG trace and the raw LFP, plus a colour-coded state bar.  States are
-scored at 1 s resolution by arming a state (keys 0-5) and clicking the two time
-bounds.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
+scored at 1 s resolution by arming a state (keys 1-3: awake/NREM/REM, 0 =
+erase) and clicking the two time bounds.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
 interoperates with the original MATLAB toolkit.
 
-State codes:  0 none, 1 awake, 2 light/drowsy, 3 NREM, 4 intermediate, 5 REM.
+State codes:  0 none, 1 awake, 3 NREM, 5 REM — the three-state scheme of
+Watson et al. 2016 (Neuron). The legacy codes 2 (light/drowsy) and 4
+(intermediate) are no longer scored; old files containing them are mapped on
+load (2 -> awake, 4 -> NREM).
 Every bin starts as NREM (3) by default, so scoring means re-labelling the
 non-NREM stretches rather than covering the whole recording.
 
@@ -49,14 +52,28 @@ except Exception:                                   # pragma: no cover
 STATE_COLORS = {
     0: np.array([1.00, 1.00, 1.00]),            # white  - no state
     1: np.array([0.00, 0.00, 0.00]),            # black  - awake
-    2: np.array([255, 236, 79]) / 255.0,        # yellow - light/drowsy
     3: np.array([6, 113, 148]) / 255.0,         # blue   - NREM
-    4: np.array([19, 166, 50]) / 255.0,         # green  - intermediate
     5: np.array([207, 46, 49]) / 255.0,         # red    - REM
 }
-STATE_NAMES = {0: "none", 1: "awake", 2: "light/drowsy",
-               3: "NREM", 4: "intermediate", 5: "REM"}
+STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 5: "REM"}
 DEFAULT_STATE = 3     # every bin starts as NREM; scoring re-labels the rest
+STATE_TICKS = ([1, 3, 5], ["W", "N", "R"])   # hypnogram y-axis
+# keyboard -> state code: sequential keys 1-3, decoupled from the stored
+# HM codes (1/3/5) so the .mat files stay MATLAB-compatible
+KEY_TO_STATE = {"0": 0, "1": 1, "2": 3, "3": 5}
+STATE_TO_KEY = {v: k for k, v in KEY_TO_STATE.items()}
+
+
+def sanitize_states(states):
+    """Map the legacy 5-state codes onto the 3-state scheme.
+
+    2 (light/drowsy) -> 1 (awake, the paper folds drowsy/microarousals into
+    WAKE) and 4 (intermediate) -> 3 (NREM); 0/1/3/5 pass through unchanged.
+    """
+    s = np.asarray(states, dtype=int).copy()
+    s[s == 2] = 1
+    s[s == 4] = 3
+    return s
 
 MAX_FREQ = 60.0       # default visible frequency extent (Hz)
 HANNING_W = 10        # temporal smoothing window for the spectrogram
@@ -95,7 +112,7 @@ _SLIDER_STYLE = (
     "QSlider::handle:horizontal:hover{border:1px solid #A9A9AF;}")
 
 HELP_LINES = [
-    ("1-5", "arm a state (then Space Space to score an epoch)"),
+    ("1-3", "arm awake/NREM/REM (then Space Space to score an epoch)"),
     ("← →", "move the time cursor (1 s per press)"),
     ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
     ("0", "arm 'no state' (erase)"),
@@ -175,7 +192,7 @@ class StateEditor:
 
         self.states = (np.full(self.n_bins, DEFAULT_STATE, dtype=int)
                        if states is None
-                       else np.asarray(states, dtype=int).copy())
+                       else sanitize_states(states))
         self.history = []          # for undo
 
         # --- optional auto-scored (Buzsáki) labels, shown in an extra panel ----
@@ -254,7 +271,7 @@ class StateEditor:
         """Resample provided auto-labels onto this session's 1 s bins (nearest)."""
         if auto_states is None:
             return None
-        a = np.asarray(auto_states, dtype=int).ravel()
+        a = sanitize_states(np.asarray(auto_states, dtype=int).ravel())
         if a.size == self.n_bins and auto_states_ts is None:
             return a.copy()
         if auto_states_ts is not None:
@@ -403,7 +420,7 @@ class StateEditor:
         self.win.statusBar().showMessage("Ready — no unsaved changes")
 
         # second row: colour-coded state-arm toggle buttons (click to arm, click
-        # again to un-arm). They stay in sync with the 0–5 / c keyboard shortcuts.
+        # again to un-arm). They stay in sync with the 0-3 / c keyboard shortcuts.
         states_tb = QToolBar("States", self.win)
         states_tb.setMovable(False)
         states_tb.setStyleSheet(_TB_STYLE + "QToolBar{spacing:6px;}")
@@ -412,15 +429,15 @@ class StateEditor:
         arm_lbl = _QLabel("  Arm state: ")
         arm_lbl.setStyleSheet("color:#55555A; font-size:12px; font-weight:600;")
         states_tb.addWidget(arm_lbl)
-        labels = {0: "erase", 1: "awake", 2: "light", 3: "NREM",
-                  4: "interm", 5: "REM"}
+        labels = {0: "erase", 1: "awake", 3: "NREM", 5: "REM"}
         self._state_btns = {}
-        for s in (1, 2, 3, 4, 5, 0):
+        for s in (1, 3, 5, 0):
             r, g, b = (STATE_COLORS[s] * 255).astype(int)
             fg = "#ffffff" if (0.299 * r + 0.587 * g + 0.114 * b) < 140 else "#111111"
-            btn = _QPushButton(f"{s}  {labels[s]}")
+            key = STATE_TO_KEY[s]
+            btn = _QPushButton(f"{key}  {labels[s]}")
             btn.setCheckable(True)
-            btn.setToolTip(f"Arm state {s} ({STATE_NAMES[s]}) — click again to un-arm  (key {s})")
+            btn.setToolTip(f"Arm {STATE_NAMES[s]} — click again to un-arm  (key {key})")
             btn.setStyleSheet(
                 f"QPushButton{{background:rgb({r},{g},{b}); color:{fg};"
                 f" border:1px solid rgba(0,0,0,0.12); border-radius:8px;"
@@ -804,14 +821,15 @@ class StateEditor:
         scored, total = self._coverage()
         pct = 100.0 * scored / total if total else 0.0
         if self.current_state is not None:
-            armed = f"{self.current_state} {STATE_NAMES[self.current_state]}"
+            armed = (f"{STATE_TO_KEY[self.current_state]} "
+                     f"{STATE_NAMES[self.current_state]}")
         elif self.event_mode:
             armed = f"{self.event_mode} ev{self.event_num}"
         else:
             armed = "—"
         counts = "   ".join(
             f"{lab} {int(np.count_nonzero(self.states == s))}"
-            for s, lab in ((1, "W"), (2, "L"), (3, "N"), (4, "I"), (5, "R")))
+            for s, lab in ((1, "W"), (3, "N"), (5, "R")))
         self.stats_lbl.setText(
             f"armed: {armed}      scored {pct:.1f}%      {counts}      "
             f"{len(self.events)} ev")
@@ -846,8 +864,8 @@ class StateEditor:
     def _draw_state_bar(self):
         self.ax_state.clear()
         self._plot_hypnogram(self.ax_state, self.states)
-        self.ax_state.set_yticks([1, 2, 3, 4, 5])
-        self.ax_state.set_yticklabels(["W", "L", "N", "I", "R"], fontsize=7)
+        self.ax_state.set_yticks(STATE_TICKS[0])
+        self.ax_state.set_yticklabels(STATE_TICKS[1], fontsize=7)
         self.ax_state.set_xticks([])
         self.ax_state.set_ylabel("Manual", fontsize=8.5, fontweight="bold",
                                  rotation=0, ha="right", va="center", labelpad=8)
@@ -892,8 +910,8 @@ class StateEditor:
             return
         self.ax_auto.clear()
         self._plot_hypnogram(self.ax_auto, self.auto_states)
-        self.ax_auto.set_yticks([1, 2, 3, 4, 5])
-        self.ax_auto.set_yticklabels(["W", "L", "N", "I", "R"], fontsize=7)
+        self.ax_auto.set_yticks(STATE_TICKS[0])
+        self.ax_auto.set_yticklabels(STATE_TICKS[1], fontsize=7)
         self.ax_auto.set_xticks([])
         self.ax_auto.set_ylabel(self.auto_label, fontsize=8.5, fontweight="bold",
                                 rotation=0, ha="right", va="center", labelpad=8)
@@ -909,7 +927,7 @@ class StateEditor:
     def _set_title(self):
         extra = ""
         if self.current_state is not None:
-            extra = f" - Add State {self.current_state} ({STATE_NAMES[self.current_state]})"
+            extra = f" - Add State {STATE_NAMES[self.current_state]}"
         elif self.event_mode == "add":
             extra = f" - Add Event {self.event_num} (click to place)"
         elif self.event_mode == "delete":
@@ -1050,8 +1068,8 @@ class StateEditor:
 
     def _on_key(self, event):
         k = event.key
-        if k in "012345":
-            self.current_state = int(k)
+        if k in KEY_TO_STATE:
+            self.current_state = KEY_TO_STATE[k]
             self.event_mode = None
             self.pending_bound = None
             self._clear_pending_line()
@@ -1369,7 +1387,7 @@ class StateEditor:
             return
         data = np.load(path) if path.endswith(".npz") else loadmat(path)
         if "states" in data:
-            s = np.asarray(data["states"]).ravel().astype(int)
+            s = sanitize_states(np.asarray(data["states"]).ravel())
             if s.size == self.n_bins:
                 self.states = s
                 self.dirty = False

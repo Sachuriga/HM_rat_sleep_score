@@ -10,10 +10,12 @@ Sleep states:
 |------|-------|
 | 0 | No state |
 | 1 | Awake |
-| 2 | Light / Drowsy |
 | 3 | NREM |
-| 4 | Intermediate |
 | 5 | REM |
+
+Only the three states of Watson et al. (2016, *Neuron*) are scored. The legacy
+codes 2 (light/drowsy) and 4 (intermediate) are gone; files containing them
+are mapped on load (2 → awake, 4 → NREM).
 
 The state editor is a Python reimplementation of `TheStateEditor` (originally by
 Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
@@ -92,8 +94,8 @@ keyboard/mouse controls.
 
 ### Scoring in the editor
 
-- **Arm a state** with the coloured toolbar buttons (or keys `1`–`5`, `0` to
-  erase); click again / press `c` to un-arm.
+- **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `2`
+  NREM, `3` REM, `0` erase); click again / press `c` to un-arm.
 - **Score an epoch**: with a state armed, click two time points (or press
   `Space` twice) to assign it to that span (minimum 10 s).
 - **Navigate**: `← →` move the time cursor (hold to accelerate), `Shift+← →`
@@ -107,7 +109,7 @@ Saved scoring contains:
 
 | Field | Description |
 |-------|-------------|
-| `states` | Length-N vector (1 s bins), values 0–5 per bin |
+| `states` | Length-N vector (1 s bins), values 0/1/3/5 per bin |
 | `events` | N×2 array of event numbers and timestamps (s) |
 | `transitions` | N×3 array `[state, start_s, end_s]` |
 | `timestamps` | (`.npz` only) per-bin time in seconds |
