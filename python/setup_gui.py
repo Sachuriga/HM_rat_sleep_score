@@ -429,8 +429,16 @@ class SetupGUI(QMainWindow):
         return lbl
 
     def _hint(self, text):
+        """A small grey caption under a field.
+
+        Word-wrapped, and allowed to shrink: without this a long hint sets a
+        minimum width for its card, the whole layout grows past the window, and
+        the Browse buttons on the path rows end up off-screen.
+        """
         lbl = QLabel(text)
         lbl.setObjectName("Hint")
+        lbl.setWordWrap(True)
+        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
         return lbl
 
     def _divider(self):
