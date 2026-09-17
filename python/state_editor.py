@@ -1498,14 +1498,28 @@ class StateEditor:
         return path
 
     def save_results(self):
-        """Save the scoring: back into the resumed file, else a new
-        ``<results_folder>/results_<date>_<name>``.
+        """Save the scoring, into the session NWB when there is one.
 
-        Written automatically when the editor window closes: both a NumPy
-        ``.npz`` (resumable) and a MATLAB ``.mat``. A session that resumed an
-        earlier scoring updates that file in place — no second copy per day —
-        while a fresh session is stamped with today's date and the "Labeled by"
-        name given on launch."""
+        Called automatically when the editor window closes. The NWB is the
+        store: one entry per scorer, replaced on every save. The
+        ``results/results_<date>_<name>.npz`` + ``.mat`` pair is only written
+        when the NWB is missing or refuses the write, so a normal session
+        leaves no loose files behind — and a session that cannot reach its NWB
+        still never loses the scoring.
+        """
+        if self._save_to_nwb():
+            self.dirty = False
+            self._set_title()
+            return self.nwb_path
+        return self._save_results_files()
+
+    def _save_results_files(self):
+        """Fallback: write the scoring as ``.npz`` + ``.mat`` under results/.
+
+        Used when there is no session NWB (an older .npy-only session) or the
+        NWB write failed. A session that resumed one of these files updates it
+        in place — no second copy per day.
+        """
         if self.results_path:                  # resumed: update that file
             stem_path = os.path.splitext(self.results_path)[0]
         else:
@@ -1531,7 +1545,6 @@ class StateEditor:
                            "labeled_by": self.labeled_by or "unknown"})
         print(f"Saved results to {npz_path} (+ .mat)")
         self.results_path = npz_path       # further saves update the same file
-        self._save_to_nwb()
         self.dirty = False
         self._set_title()
         return npz_path

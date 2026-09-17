@@ -56,6 +56,7 @@ SESSION_INFO_NAME = "session_info"
 DERIVED_NAMES = ("awakeness", "emg_rms", "theta_delta_ratio")
 STATES_PREFIX = "states_"
 EVENTS_PREFIX = "events_"
+AUTO_STATES_NAME = "auto_states"   # the automatic scoring, kept apart from people's
 LAYOUT_NAME = "layout"          # where the contract below is recorded in the file
 LAYOUT_VERSION = 1
 
@@ -330,6 +331,18 @@ def read_scoring(nwb_path, scorer=None, name=None, timestamps=None):
         codes = np.asarray(table["state_code"][:], dtype=int)
         events = _read_events(mod, meta.get("scorer", ""))
 
+    states, timestamps = _expand_runs(starts, stops, codes, meta, timestamps)
+    meta["events"] = events
+    meta["name"] = target
+    return states, timestamps, meta
+
+
+def _expand_runs(starts, stops, codes, meta, timestamps=None):
+    """Turn a run-length state table back into per-bin codes.
+
+    Without ``timestamps`` the bin grid is rebuilt from the metadata the table
+    was written with, so a scoring round-trips exactly.
+    """
     if timestamps is None:
         dt = float(meta.get("dt") or 1.0)
         t0 = float(meta.get("t0", starts[0] if starts.size else 0.0))
@@ -340,9 +353,7 @@ def read_scoring(nwb_path, scorer=None, name=None, timestamps=None):
     states = np.zeros(timestamps.size, dtype=int)
     for a, b, c in zip(starts, stops, codes):
         states[(timestamps >= a) & (timestamps <= b)] = c
-    meta["events"] = events
-    meta["name"] = target
-    return states, timestamps, meta
+    return states, timestamps
 
 
 def _read_events(mod, scorer):
@@ -355,14 +366,11 @@ def _read_events(mod, scorer):
     return np.column_stack([nums, times]) if nums.size else np.zeros((0, 2))
 
 
-def write_scoring(nwb_path, states, timestamps, scorer, events=None,
-                  date=None, extra=None):
-    """Save one scorer's result into the session NWB (in place, ``r+``).
+def _write_states_table(nwb_path, table_name, states, timestamps, meta,
+                        events=None, events_name=None, events_desc=""):
+    """Write one run-length state table into ``processing/sleep`` (in place).
 
-    Stored as a ``TimeIntervals`` of contiguous epochs under
-    ``processing/sleep/states_<scorer>``. Re-saving the same scorer REPLACES
-    that scorer's tables rather than adding a second copy, so re-opening and
-    continuing a scoring keeps one row per scorer. Returns the table name.
+    Replaces any table of the same name, so re-saving never leaves two copies.
     """
     from pynwb import NWBHDF5IO, TimeSeries
     from pynwb.epoch import TimeIntervals
@@ -371,20 +379,14 @@ def write_scoring(nwb_path, states, timestamps, scorer, events=None,
     timestamps = np.asarray(timestamps, dtype=float).ravel()
     n = min(states.size, timestamps.size)
     states, timestamps = states[:n], timestamps[:n]
-    slug = _slug(scorer)
-    table_name = STATES_PREFIX + slug
-    events_name = EVENTS_PREFIX + slug
     dt = float(np.median(np.diff(timestamps))) if n > 1 else 1.0
-    date = date or datetime.now(timezone.utc).astimezone().date().isoformat()
-
-    meta = {"scorer": str(scorer), "date": date, "n_bins": int(n), "dt": dt,
+    meta = {**meta, "n_bins": int(n), "dt": dt,
             "t0": float(timestamps[0]) if n else 0.0,
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "state_names": {str(k): v for k, v in STATE_NAMES.items()}}
-    meta.update(extra or {})
 
-    # drop any previous tables for this scorer first, at the HDF5 level: pynwb
-    # can only add to an r+ file, so replacing means deleting before reopening.
+    # drop the previous tables first, at the HDF5 level: pynwb can only add to
+    # an r+ file, so replacing means deleting before reopening.
     _h5_delete(nwb_path, [table_name, events_name])
 
     io = NWBHDF5IO(str(nwb_path), mode="r+")
@@ -407,14 +409,68 @@ def write_scoring(nwb_path, states, timestamps, scorer, events=None,
 
         events = np.asarray(events if events is not None else
                             np.zeros((0, 2)), dtype=float).reshape(-1, 2)
-        if events.size:
+        if events.size and events_name:
             mod.add(TimeSeries(name=events_name, data=events[:, 0],
                                timestamps=events[:, 1], unit="n/a",
-                               description=f"Event marks placed by {scorer}."))
+                               description=events_desc))
         io.write(nwbfile)
     finally:
         io.close()
     return table_name
+
+
+def write_scoring(nwb_path, states, timestamps, scorer, events=None,
+                  date=None, extra=None):
+    """Save one scorer's result into the session NWB (in place, ``r+``).
+
+    Stored as a ``TimeIntervals`` of contiguous epochs under
+    ``processing/sleep/states_<scorer>``. Re-saving the same scorer REPLACES
+    that scorer's tables rather than adding a second copy, so re-opening and
+    continuing a scoring keeps one row per scorer. Returns the table name.
+    """
+    slug = _slug(scorer)
+    meta = {"scorer": str(scorer),
+            "date": date or datetime.now(timezone.utc).astimezone().date().isoformat()}
+    meta.update(extra or {})
+    return _write_states_table(
+        nwb_path, STATES_PREFIX + slug, states, timestamps, meta,
+        events=events, events_name=EVENTS_PREFIX + slug,
+        events_desc=f"Event marks placed by {scorer}.")
+
+
+def write_auto_states(nwb_path, states, timestamps, source="buzsaki", extra=None):
+    """Store the automatic scoring in the session NWB.
+
+    Kept out of the ``states_<scorer>`` namespace on purpose: it is a
+    suggestion shown beside the manual scoring, not somebody's work, so it must
+    never turn up in the "Reload state scored by" dropdown. Replaces any
+    previous auto scoring.
+    """
+    meta = {"source": str(source),
+            "date": datetime.now(timezone.utc).astimezone().date().isoformat()}
+    meta.update(extra or {})
+    return _write_states_table(nwb_path, AUTO_STATES_NAME, states, timestamps, meta)
+
+
+def read_auto_states(nwb_path, timestamps=None):
+    """The stored automatic scoring as ``(states, timestamps, meta)``.
+
+    ``(None, None, {})`` when the file has none.
+    """
+    from pynwb import NWBHDF5IO
+
+    if not Path(nwb_path).is_file():
+        return None, None, {}
+    with NWBHDF5IO(str(nwb_path), mode="r") as io:
+        mod = _sleep_module(io.read())
+        if mod is None or AUTO_STATES_NAME not in mod.data_interfaces:
+            return None, None, {}
+        table = mod[AUTO_STATES_NAME]
+        meta = _meta_of(table)
+        starts = np.asarray(table["start_time"][:], dtype=float)
+        stops = np.asarray(table["stop_time"][:], dtype=float)
+        codes = np.asarray(table["state_code"][:], dtype=int)
+    return _expand_runs(starts, stops, codes, meta, timestamps) + (meta,)
 
 
 def _h5_delete(nwb_path, names):

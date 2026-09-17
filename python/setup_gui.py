@@ -857,21 +857,51 @@ class SetupGUI(QMainWindow):
             self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
             res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0],
                                                fs=eeg_fs, **kw)
-            from processing import output_prefix
-            pfx = output_prefix(self.lfp_folder)
-            bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
             scorer = res.get("model") or "threshold scorer"
+            # Into the session NWB, beside the manual scorings but in its own
+            # container — so it is never offered in the "Reload state scored by"
+            # dropdown, and no buzsaki_states.npz is left lying around.
+            self._save_auto_states(res, scorer, ch)
             self._set_status(f"Auto-score recomputed ({scorer}).", OK_GREEN)
             return res["states"], res["timestamps"]
         except Exception as exc:
             import traceback
             traceback.print_exc()          # full details on the console
+            saved = self._load_auto_states()
+            if saved[0] is not None:
+                self._set_status(f"Compute failed; loaded the stored auto-score "
+                                 f"({exc})", WARN)
+                return saved
             for folder in (self.lfp_folder, self.out_folder):
-                f = find_output(folder, bz.DEFAULT_OUT)   # prefixed or not
+                f = find_output(folder, bz.DEFAULT_OUT)   # legacy .npz, if any
                 if f is not None:
                     self._set_status(f"Compute failed; loaded saved labels ({exc})", WARN)
                     return bz.load_states(f)
             self._set_status(f"Buzsáki auto-score skipped: {exc}", WARN)
+            return None, None
+
+    def _save_auto_states(self, res, scorer, channel):
+        """Store the auto-score in the session NWB (no-op without one)."""
+        if not self.nwb_path:
+            return
+        try:
+            import sleep_nwb_store as snwb
+            snwb.write_auto_states(self.nwb_path, res["states"], res["timestamps"],
+                                   source=scorer,
+                                   extra={"channel": int(channel)})
+        except Exception as exc:
+            print(f"Warning: could not store the auto-score in the NWB: {exc}")
+
+    def _load_auto_states(self):
+        """The auto-score already stored in the session NWB, else (None, None)."""
+        if not self.nwb_path:
+            return None, None
+        try:
+            import sleep_nwb_store as snwb
+            states, ts, _ = snwb.read_auto_states(self.nwb_path)
+            return states, ts
+        except Exception as exc:
+            print(f"Warning: could not read the stored auto-score: {exc}")
             return None, None
 
     def _load_overlays(self):
