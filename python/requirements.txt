@@ -1,4 +1,5 @@
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
+pynwb>=3.1        # session NWB (recording + scorings in one file)
 # tkinter ships with CPython (install the python3-tk system package on Linux)

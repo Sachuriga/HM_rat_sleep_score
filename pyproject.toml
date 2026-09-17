@@ -9,6 +9,7 @@ description = "HM rat sleep-scoring toolkit + Qt GUI (sleepscore command)"
 requires-python = ">=3.9"
 dependencies = [
     "PyQt6", "numpy", "scipy", "matplotlib",
+    "pynwb",        # session NWB: reading the recording, storing each scoring
     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",  # macOS window vibrancy
 ]
 

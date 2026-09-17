@@ -412,6 +412,9 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `isolate_labels.py` | Split a session into a label-free student copy + the ground truth |
 | `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
+| `sleep_nwb.py` | Session NWB I/O — the recording in, each scoring out |
+| `import_labels.py` | Put `results/` scorings into the session NWB |
+| `isolate_labels.py` | Take scorings back out (student copy + ground truth) |
 | `test_pipeline.py` | Headless smoke test (`python test_pipeline.py`) |
 
 ## Differences from the MATLAB version
