@@ -4,16 +4,20 @@ A Python reimplementation of the MATLAB sleep-scoring GUI in [`../scr/`](../scr)
 Load LFP `.npy` recordings, pick three channels and a motion signal, view
 whitened multitaper spectrograms, and score sleep states by hand.
 
-| Code | State |
-|------|-------|
-| 0 | No state |
-| 1 | Awake |
-| 3 | NREM |
-| 5 | REM |
+| Code | State | Key |
+|------|-------|-----|
+| 0 | No state | `0` |
+| 1 | Awake | `1` |
+| 3 | NREM | `2` |
+| 5 | REM | `3` |
+| 4 | Intermediate | `4` |
 
-Only the three states of Watson et al. (2016, *Neuron*) are scored. The legacy
-codes 2 (light/drowsy) and 4 (intermediate) are gone; files containing them
-are mapped on load (2 → awake, 4 → NREM).
+The three states of Watson et al. (2016, *Neuron*) plus **intermediate** sleep,
+the NREM→REM transition. Keys are sequential (`1`–`4`) while the stored codes
+stay 1/3/4/5, so files remain MATLAB-compatible. The legacy code 2
+(light/drowsy) is not scored — that paper folds drowsy periods and
+microarousals into WAKE — and old files containing it are mapped on load
+(2 → awake).
 
 ## Requirements
 
@@ -80,14 +84,16 @@ channels or the sampling rate).
 
 | Key | Action |
 |-----|--------|
-| `1`–`3` (awake/NREM/REM, `0` = erase) | Arm a state, then click the two time bounds on any spectrogram/motion/state panel |
+| `1`–`4` (awake/NREM/REM/intermediate, `0` = erase) | Arm a state, then mark the two time bounds with `Space` `Space` |
 | `c` | Cancel the current state action |
-| Left / Right | Pan the view |
+| Left / Right | Step the time cursor; the view scrolls to keep it centred |
+| Shift + Left / Right | Pan by a whole window |
 | Home / End | Jump to the start / end of the recording |
-| Scroll wheel | Zoom in / out (around the cursor) |
+| **Drag** a spectrogram/motion/state panel | Pan the window along time, like the Position slider |
+| Scroll wheel | Zoom in / out (about the centred cursor) |
 | Up / Down | Increase / decrease spectrogram contrast |
 | `-` / `=` | Decrease / increase the LFP display width |
-| Single click (no armed state) | Centre the LFP view on the click |
+| Single click (no armed state) | Move the cursor there — the view re-centres on it |
 | `r` | Reset the time axis to the full extent |
 | `u` | Undo the last state change |
 | `e` / `d` | Toggle add / delete **event** mode, then click to place/remove a mark |
@@ -111,7 +117,7 @@ files are interchangeable with the MATLAB toolkit:
 
 | Field | Description |
 |-------|-------------|
-| `states` | `1×N` vector (N = number of 1 s bins), values 0/1/3/5 |
+| `states` | `1×N` vector (N = number of 1 s bins), values 0/1/3/4/5 |
 | `events` | `M×2` matrix of `[event_number, time_s]` (empty when no events placed) |
 | `transitions` | `N×3` `[state, start_s, end_s]` for each contiguous scored run |
 
@@ -149,7 +155,9 @@ from three metrics — all 0–1 normalised, each split at its bimodal-histogram
 
 Classified in the paper's order: `NREM = SW>thr`; `REM = ~NREM & theta>thr &
 EMG<thr`; `WAKE` = the rest (movement, microarousals and quiet wake all count
-as WAKE — no intermediate states). Without an EMG/motion signal the REM gate
+as WAKE). The automatic labels use only these three states — intermediate
+sleep is a manual-only label, so it never appears in the `Auto` bar. Without an
+EMG/motion signal the REM gate
 uses theta only (REM tends to be over-called — supply `emg_from_lfp*.npy` for
 a proper split).
 

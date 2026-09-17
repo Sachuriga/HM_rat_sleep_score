@@ -6,16 +6,20 @@ signal, and score sleep states in an interactive spectrogram editor.
 
 Sleep states:
 
-| Code | State |
-|------|-------|
-| 0 | No state |
-| 1 | Awake |
-| 3 | NREM |
-| 5 | REM |
+| Code | State | Key |
+|------|-------|-----|
+| 0 | No state | `0` |
+| 1 | Awake | `1` |
+| 3 | NREM | `2` |
+| 5 | REM | `3` |
+| 4 | Intermediate | `4` |
 
-Only the three states of Watson et al. (2016, *Neuron*) are scored. The legacy
-codes 2 (light/drowsy) and 4 (intermediate) are gone; files containing them
-are mapped on load (2 → awake, 4 → NREM).
+The three states of Watson et al. (2016, *Neuron*) plus **intermediate** sleep,
+the NREM→REM transition. Keys are sequential (`1`–`4`) while the stored codes
+stay 1/3/4/5, so files remain MATLAB-compatible. The legacy code 2
+(light/drowsy) is not scored — that paper folds drowsy periods and
+microarousals into WAKE — and old files containing it are mapped on load
+(2 → awake).
 
 The state editor is a Python reimplementation of `TheStateEditor` (originally by
 Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
@@ -98,11 +102,16 @@ keyboard/mouse controls.
 ### Scoring in the editor
 
 - **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `2`
-  NREM, `3` REM, `0` erase); click again / press `c` to un-arm.
+  NREM, `3` REM, `4` intermediate, `0` erase); click again / press `c` to
+  un-arm.
 - **Score an epoch**: with a state armed, click two time points (or press
   `Space` twice) to assign it to that span (minimum 10 s).
-- **Navigate**: `← →` move the time cursor (hold to accelerate), `Shift+← →`
-  pan, scroll to zoom, `Home`/`End` jump to the ends, `r` resets the view.
+- **Navigate**: the time cursor is a fixed playhead that holds the **middle**
+  of the spectrograms — the data moves past it. `← →` step it, a click brings
+  that moment to the centre, and **dragging** a panel pans the window just like
+  the Position slider. Scroll zooms about the cursor, `Shift+← →` pans a whole
+  window, `Home`/`End` jump to the ends, `r` resets the view. (Near either end
+  of the recording the view runs out of room, so the cursor sits off-centre.)
 - **Save / load**: the toolbar has **Save .npy** (NumPy `.npz`), **Save .mat**
   (`s`), and **Load** (reads either format, `l`). `u` undoes the last change.
 
@@ -112,7 +121,7 @@ Saved scoring contains:
 
 | Field | Description |
 |-------|-------------|
-| `states` | Length-N vector (1 s bins), values 0/1/3/5 per bin |
+| `states` | Length-N vector (1 s bins), values 0/1/3/4/5 per bin |
 | `events` | N×2 array of event numbers and timestamps (s) |
 | `transitions` | N×3 array `[state, start_s, end_s]` |
 | `timestamps` | (`.npz` only) per-bin time in seconds |

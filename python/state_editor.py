@@ -2,14 +2,17 @@
 
 Displays, for up to three LFP channels, a whitened multitaper spectrogram, a
 motion/EMG trace and the raw LFP, plus a colour-coded state bar.  States are
-scored at 1 s resolution by arming a state (keys 1-3: awake/NREM/REM, 0 =
-erase) and clicking the two time bounds.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
+scored at 1 s resolution by arming a state (keys 1-4: awake/NREM/REM/
+intermediate, 0 = erase) and marking the two time bounds.  The time cursor is
+a fixed playhead held at the middle of the view; the spectrograms scroll past
+it, and a panel can be dragged to pan as the Position slider does.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
 interoperates with the original MATLAB toolkit.
 
-State codes:  0 none, 1 awake, 3 NREM, 5 REM — the three-state scheme of
-Watson et al. 2016 (Neuron). The legacy codes 2 (light/drowsy) and 4
-(intermediate) are no longer scored; old files containing them are mapped on
-load (2 -> awake, 4 -> NREM).
+State codes:  0 none, 1 awake, 3 NREM, 4 intermediate, 5 REM — the three
+states of Watson et al. 2016 (Neuron) plus intermediate sleep, the NREM->REM
+transition. The legacy code 2 (light/drowsy) is no longer scored; old files
+containing it are mapped on load (2 -> awake), since that paper folds drowsy
+periods and microarousals into WAKE.
 Every bin starts as NREM (3) by default, so scoring means re-labelling the
 non-NREM stretches rather than covering the whole recording.
 
@@ -56,26 +59,27 @@ STATE_COLORS = {
     0: np.array([1.00, 1.00, 1.00]),            # white  - no state
     1: np.array([0.00, 0.00, 0.00]),            # black  - awake
     3: np.array([6, 113, 148]) / 255.0,         # blue   - NREM
+    4: np.array([19, 166, 50]) / 255.0,         # green  - intermediate
     5: np.array([207, 46, 49]) / 255.0,         # red    - REM
 }
-STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 5: "REM"}
+STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 4: "intermediate", 5: "REM"}
 DEFAULT_STATE = 3     # every bin starts as NREM; scoring re-labels the rest
-STATE_TICKS = ([1, 3, 5], ["W", "N", "R"])   # hypnogram y-axis
-# keyboard -> state code: sequential keys 1-3, decoupled from the stored
-# HM codes (1/3/5) so the .mat files stay MATLAB-compatible
-KEY_TO_STATE = {"0": 0, "1": 1, "2": 3, "3": 5}
+STATE_TICKS = ([1, 3, 4, 5], ["W", "N", "I", "R"])   # hypnogram y-axis
+# keyboard -> state code: sequential keys 1-4, decoupled from the stored
+# HM codes (1/3/4/5) so the .mat files stay MATLAB-compatible
+KEY_TO_STATE = {"0": 0, "1": 1, "2": 3, "3": 5, "4": 4}
 STATE_TO_KEY = {v: k for k, v in KEY_TO_STATE.items()}
 
 
 def sanitize_states(states):
-    """Map the legacy 5-state codes onto the 3-state scheme.
+    """Map the legacy light/drowsy code onto the states this editor scores.
 
-    2 (light/drowsy) -> 1 (awake, the paper folds drowsy/microarousals into
-    WAKE) and 4 (intermediate) -> 3 (NREM); 0/1/3/5 pass through unchanged.
+    2 (light/drowsy) -> 1 (awake: Watson et al. 2016 folds drowsy periods and
+    microarousals into WAKE); 0/1/3/4/5 pass through unchanged, so intermediate
+    sleep (4) scored here or in the MATLAB tool survives a round trip.
     """
     s = np.asarray(states, dtype=int).copy()
     s[s == 2] = 1
-    s[s == 4] = 3
     return s
 
 MAX_FREQ = 60.0       # default visible frequency extent (Hz)
@@ -87,6 +91,7 @@ MIN_VIEW_WINDOW = 10.0  # smallest main-view window (s)
 MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span >= 10 s
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
 ARROW_STEP = 1        # bins the time cursor moves per ← → press (1 bin = 1 s)
+DRAG_PX = 3           # pointer travel (px) past which a press is a drag, not a click
 EMG_SENS = 0.8        # EMG 1/0-band threshold multiplier (<1 = more sensitive)
 # Spectrogram colormaps offered in the toolbar picker: the modern perceptually-
 # uniform maps first, then the classics. Filtered at build time against what
@@ -115,12 +120,13 @@ _SLIDER_STYLE = (
     "QSlider::handle:horizontal:hover{border:1px solid #A9A9AF;}")
 
 HELP_LINES = [
-    ("1-3", "arm awake/NREM/REM (then Space Space to score an epoch)"),
+    ("1-4", "arm awake/NREM/REM/intermediate (then Space Space to score)"),
     ("← →", "move the time cursor (1 s per press)"),
     ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
     ("0", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
-    ("click", "move the time cursor here (never scores)"),
+    ("click", "move the cursor here — it re-centres (never scores)"),
+    ("drag", "pan the window along time (like the Position slider)"),
     ("Shift+← →", "pan the window left / right"),
     ("Home / End", "jump to start / end"),
     ("scroll", "zoom in / out around the cursor"),
@@ -254,6 +260,7 @@ class StateEditor:
         # movable time cursor (← → step it, space confirms epoch bounds)
         self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
         self.cursor_time = float((self.lims[0] + self.lims[1]) / 2)
+        self._drag = None           # in-progress drag-pan (see _on_press)
         self._slider_guard = False
 
         # --- event marking state --------------------------------------------
@@ -415,7 +422,9 @@ class StateEditor:
         add("💾  Save .mat", self.save_states, "Save scoring as MATLAB -states.mat  (s)")
         add("📂  Load", self.load_states, "Load a saved .npz / .mat scoring  (l)")
         tb.addSeparator()
-        add("↺  Reset view", lambda: self._set_xlim(*self.lims), "Reset time axis to full extent  (r)")
+        add("↺  Reset view",
+            lambda: self._pan_to(self.lims[0], self.lims[1] - self.lims[0]),
+            "Reset time axis to full extent  (r)")
         add("⟲  Undo", self._undo, "Undo last state change  (u)")
         tb.addSeparator()
         add("❔  Help", self._toggle_help, "Toggle the keyboard/mouse help overlay  (h)")
@@ -440,7 +449,7 @@ class StateEditor:
         self.win.statusBar().showMessage("Ready — no unsaved changes")
 
         # second row: colour-coded state-arm toggle buttons (click to arm, click
-        # again to un-arm). They stay in sync with the 0-3 / c keyboard shortcuts.
+        # again to un-arm). They stay in sync with the 0-4 / c keyboard shortcuts.
         states_tb = QToolBar("States", self.win)
         states_tb.setMovable(False)
         states_tb.setStyleSheet(_TB_STYLE + "QToolBar{spacing:6px;}")
@@ -449,9 +458,10 @@ class StateEditor:
         arm_lbl = _QLabel("  Arm state: ")
         arm_lbl.setStyleSheet("color:#55555A; font-size:12px; font-weight:600;")
         states_tb.addWidget(arm_lbl)
-        labels = {0: "erase", 1: "awake", 3: "NREM", 5: "REM"}
+        labels = {0: "erase", 1: "awake", 3: "NREM", 5: "REM",
+                  4: "interm"}
         self._state_btns = {}
-        for s in (1, 3, 5, 0):
+        for s in (1, 3, 5, 4, 0):
             r, g, b = (STATE_COLORS[s] * 255).astype(int)
             fg = "#ffffff" if (0.299 * r + 0.587 * g + 0.114 * b) < 140 else "#111111"
             key = STATE_TO_KEY[s]
@@ -793,18 +803,14 @@ class StateEditor:
     def _on_win_slider(self, val):
         if self._slider_guard:
             return
-        lo, hi = self._xlim_get()
-        centre = (lo + hi) / 2
         half = float(val) / 2
-        self._set_xlim(centre - half, centre + half)
+        self._set_xlim(self.cursor_time - half, self.cursor_time + half)
 
     def _on_pos_slider(self, val):
         if self._slider_guard:
             return
         lo, hi = self._xlim_get()
-        width = hi - lo                         # keep the current window size
-        start = min(max(float(val), self.lims[0]), self.lims[1] - width)
-        self._set_xlim(start, start + width)
+        self._pan_to(float(val), hi - lo)       # keep the current window size
 
     def _sync_sliders(self, lo, hi):
         """Reflect the current x-limits back onto the sliders (no feedback loop)."""
@@ -849,7 +855,7 @@ class StateEditor:
             armed = "—"
         counts = "   ".join(
             f"{lab} {int(np.count_nonzero(self.states == s))}"
-            for s, lab in ((1, "W"), (3, "N"), (5, "R")))
+            for s, lab in ((1, "W"), (3, "N"), (4, "I"), (5, "R")))
         self.stats_lbl.setText(
             f"armed: {armed}      scored {pct:.1f}%      {counts}      "
             f"{len(self.events)} ev")
@@ -941,7 +947,9 @@ class StateEditor:
     def _connect(self):
         c = self.fig.canvas
         c.mpl_connect("key_press_event", self._on_key)
-        c.mpl_connect("button_press_event", self._on_click)
+        c.mpl_connect("button_press_event", self._on_press)
+        c.mpl_connect("motion_notify_event", self._on_motion)
+        c.mpl_connect("button_release_event", self._on_release)
         c.mpl_connect("scroll_event", self._on_scroll)
 
     def _set_title(self):
@@ -1049,9 +1057,12 @@ class StateEditor:
         elif high > self.lims[1]:
             low -= high - self.lims[1]
             high = self.lims[1]
-        m = (self.eeg_x >= low - 1) & (self.eeg_x <= high + 1)
+        # eeg_x is monotonic, so bracket the window by index instead of masking
+        # the whole trace — a full-length mask per redraw made dragging crawl.
+        sl = slice(int(np.searchsorted(self.eeg_x, low - 1, "left")),
+                   int(np.searchsorted(self.eeg_x, high + 1, "right")))
         for i, ln in enumerate(self.eeg_lines):
-            ln.set_data(self.eeg_x[m], self.eeg[i][m])
+            ln.set_data(self.eeg_x[sl], self.eeg[i][sl])
             self.ax_eeg[i].set_xlim(low, high)
             yl = self.eeg_yabs[i] / self.eeg_scale
             self.ax_eeg[i].set_ylim(-yl, yl)
@@ -1059,21 +1070,34 @@ class StateEditor:
         for ln in self.cursor_lines:
             ln.set_xdata([centre, centre])
 
-    def _move_cursor(self, direction, steps=1):
-        """Step the time cursor by ``steps`` bins (← →), scrolling to follow."""
-        self.cursor_time = float(np.clip(self.cursor_time + direction * steps * self._dt,
-                                         self.lims[0], self.lims[1]))
+    def _pan_to(self, start, width):
+        """Move the view to ``start`` keeping ``width`` — what the Position
+        slider does, so the window never grows at the recording's ends.
+
+        The cursor rides the middle of the new window (see ``_centre_view``)."""
+        start = min(max(start, self.lims[0]),
+                    max(self.lims[0], self.lims[1] - width))
+        self.cursor_time = float(start + width / 2)
+        self._set_xlim(start, start + width)
+
+    def _centre_view(self):
+        """Scroll the view so the time cursor sits in the middle of it.
+
+        The cursor is a fixed playhead: the data moves past it rather than the
+        cursor travelling across the window. Near either end of the recording
+        the view runs out of room and the cursor sits off-centre instead."""
         lo, hi = self._xlim_get()
         w = hi - lo
-        if self.cursor_time < lo:
-            self._set_xlim(self.cursor_time, self.cursor_time + w)
-        elif self.cursor_time > hi:
-            self._set_xlim(self.cursor_time - w, self.cursor_time)
-        else:
-            self._update_eeg(self.cursor_time)
-            if hasattr(self, "stats_lbl"):
-                self._update_info()
-            self.fig.canvas.draw_idle()
+        start = min(max(self.cursor_time - w / 2, self.lims[0]),
+                    max(self.lims[0], self.lims[1] - w))
+        self._set_xlim(start, start + w)
+
+    def _move_cursor(self, direction, steps=1):
+        """Step the time cursor by ``steps`` bins (← →); the view follows it so
+        the cursor stays centred."""
+        self.cursor_time = float(np.clip(self.cursor_time + direction * steps * self._dt,
+                                         self.lims[0], self.lims[1]))
+        self._centre_view()
 
     def _confirm_boundary(self):
         """Space: confirm the cursor as an epoch bound. 1st = start, 2nd = apply.
@@ -1131,16 +1155,16 @@ class StateEditor:
             self._confirm_boundary()
         elif k in ("shift+right", "shift+left"):    # coarse pan (whole window)
             lo, hi = self._xlim_get()
-            step = (hi - lo) * (1 if k == "shift+right" else -1)
-            self._set_xlim(lo + step, hi + step)
+            w = hi - lo
+            self._pan_to(lo + w * (1 if k == "shift+right" else -1), w)
         elif k == "home":
             lo, hi = self._xlim_get()
-            self._set_xlim(self.lims[0], self.lims[0] + (hi - lo))
+            self._pan_to(self.lims[0], hi - lo)
         elif k == "end":
             lo, hi = self._xlim_get()
-            self._set_xlim(self.lims[1] - (hi - lo), self.lims[1])
+            self._pan_to(self.lims[1] - (hi - lo), hi - lo)
         elif k == "r":
-            self._set_xlim(*self.lims)
+            self._pan_to(self.lims[0], self.lims[1] - self.lims[0])
         elif k in ("up", "down"):
             delta = -0.1 if k == "up" else 0.1
             for img in self.spec_imgs:
@@ -1177,37 +1201,65 @@ class StateEditor:
         self.fig.canvas.draw_idle()
 
     def _on_scroll(self, event):
+        """Zoom in/out about the time cursor, which holds the middle of the
+        view (so scrolling never slides the moment you are looking at away)."""
         if event.inaxes is None:
             return
         lo, hi = self._xlim_get()
-        centre = event.xdata if event.xdata is not None else (lo + hi) / 2
         factor = 0.8 if event.button == "up" else 1.25
         half = (hi - lo) * factor / 2
-        self._set_xlim(centre - half, centre + half)
+        self._set_xlim(self.cursor_time - half, self.cursor_time + half)
 
-    def _on_click(self, event):
-        if event.inaxes is None or event.xdata is None:
-            return
-        in_panel = event.inaxes in self.ax_spec or event.inaxes is self.ax_motion \
-            or event.inaxes is self.ax_state
-        if not in_panel:
-            return
+    def _in_time_panel(self, event):
+        """True for the panels sharing the main time axis (spectrograms, motion
+        and the two hypnogram bars) — the ones you can click and drag."""
+        return (event.inaxes in self.ax_spec or event.inaxes is self.ax_motion
+                or event.inaxes is self.ax_state
+                or (self.ax_auto is not None and event.inaxes is self.ax_auto))
 
-        # event marking takes precedence when armed
+    def _on_press(self, event):
+        """Left button down on a time panel: arm a possible drag-pan.
+
+        Whether it turns out to be a drag or a click is decided on release, by
+        how far the pointer travelled (``DRAG_PX``)."""
+        if event.button != 1 or event.x is None or not self._in_time_panel(event):
+            return
+        lo, hi = self._xlim_get()
+        self._drag = {"px": event.x, "start": lo, "width": hi - lo, "panned": False}
+
+    def _on_motion(self, event):
+        """Pointer moved with the button down: drag the window along the time
+        axis, exactly as the Position slider moves it."""
+        d = self._drag
+        if d is None or event.x is None:
+            return
+        dx_px = event.x - d["px"]
+        if not d["panned"] and abs(dx_px) < DRAG_PX:
+            return                      # still inside the click tolerance
+        bbox = self.ax_spec[0].get_window_extent()
+        if bbox.width <= 0:
+            return
+        d["panned"] = True
+        # drag right = pull earlier time into view, like dragging a paper strip
+        self._pan_to(d["start"] - dx_px * d["width"] / bbox.width, d["width"])
+
+    def _on_release(self, event):
+        """Button up. A drag has already panned the view; a click (no travel)
+        moves the time cursor, or places/deletes an event when that mode is
+        armed. Epoch bounds are confirmed with Space only, never by clicking."""
+        d, self._drag = self._drag, None
+        if d is not None and d["panned"]:
+            return                      # it was a pan, not a click
+        if event.button != 1 or event.xdata is None or not self._in_time_panel(event):
+            return
         if self.event_mode == "add":
             self._add_event(event.xdata)
             return
         if self.event_mode == "delete":
             self._delete_event(event.xdata)
             return
-
-        # A click only moves the time cursor (and re-centres the LFP view).
-        # Epoch boundaries are confirmed with Space only, never by clicking.
         self.cursor_time = float(event.xdata)
-        self._update_eeg(self.cursor_time)
-        if hasattr(self, "stats_lbl"):
-            self._update_info()
-        self.fig.canvas.draw_idle()
+        self._centre_view()             # the clicked moment moves to the middle
 
     def _clear_pending_line(self):
         # A pending marker drawn on the state bar is wiped by ax_state.clear() when
@@ -1286,8 +1338,8 @@ class StateEditor:
             prv = [t for t in times if t < centre - 1e-6]
             target = prv[-1] if prv else times[0]
         lo, hi = self._xlim_get()
-        half = (hi - lo) / 2
-        self._set_xlim(target - half, target + half)
+        w = hi - lo
+        self._pan_to(target - w / 2, w)         # the event lands on the cursor
 
     def _refresh_events(self):
         """Redraw all event lines (active number bold, others faint)."""

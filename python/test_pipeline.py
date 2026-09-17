@@ -93,9 +93,10 @@ st, thr = bz.cluster_states(sw_m, theta_m, emg_m,
                             swthresh=0.5, ththresh=0.5, emgthresh=0.5)
 #            NREM      NREM      REM     WAKE(mov)  WAKE     NREM(SW wins)
 assert st.tolist() == [bz.NREM, bz.NREM, bz.REM, bz.WAKE, bz.WAKE, bz.NREM]
-# legacy 5-state files: light/drowsy (2) -> awake, intermediate (4) -> NREM
-from state_editor import sanitize_states
-assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 3, 5]
+# legacy light/drowsy (2) -> awake; intermediate (4) is scored, so it survives
+from state_editor import sanitize_states, KEY_TO_STATE
+assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 4, 5]
+assert KEY_TO_STATE == {"0": 0, "1": 1, "2": 3, "3": 5, "4": 4}
 print("Buzsáki 3-state clustering + legacy-code mapping ok")
 
 # Resuming a scored file: the scorer name comes from the file (no prompt) and
@@ -126,5 +127,47 @@ from state_editor import _labeled_by_of
 assert _labeled_by_of({}, "results_2026-09-17_Sachuriga_R.npz") == "Sachuriga R"
 assert _labeled_by_of({}, "session-states.npz") is None
 print("resume round-trip ok: same scorer, same file")
+
+# Intermediate sleep (4) is scoreable and round-trips through a save/load
+ed3 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed3._apply_state(30, 45, 4)
+assert (ed3.states[30:46] == 4).all(), "intermediate not applied"
+ip = ed3.save_states_npz("/tmp/test-inter.npz")
+ed3.states[:] = 0
+ed3.load_states(ip)
+assert (ed3.states[30:46] == 4).all(), "intermediate lost in round trip"
+print("intermediate state ok")
+
+# Navigation: the cursor holds the middle of the view, and dragging pans it
+class _Ev:                       # minimal stand-in for a matplotlib MouseEvent
+    def __init__(self, **kw): self.__dict__.update(kw)
+
+span = ed3.lims[1] - ed3.lims[0]
+ed3._set_xlim(ed3.lims[0], ed3.lims[0] + span / 4)     # zoom in so panning has room
+ed3.cursor_time = float(ed3.lims[0] + span / 2)
+ed3._centre_view()
+lo, hi = ed3._xlim_get()
+assert abs((lo + hi) / 2 - ed3.cursor_time) < 1e-6, "cursor should be centred"
+
+ed3._move_cursor(1, steps=5)                            # arrows keep it centred
+lo, hi = ed3._xlim_get()
+assert abs((lo + hi) / 2 - ed3.cursor_time) < 1e-6, "cursor drifted off centre"
+
+ax = ed3.ax_spec[0]
+before = ed3._xlim_get()
+ed3._on_press(_Ev(button=1, x=400.0, xdata=before[0], inaxes=ax))
+ed3._on_motion(_Ev(button=1, x=300.0, xdata=None, inaxes=ax))   # drag 100 px left
+ed3._on_release(_Ev(button=1, x=300.0, xdata=None, inaxes=ax))
+after = ed3._xlim_get()
+assert after[0] > before[0], f"drag did not pan forward: {before} -> {after}"
+assert abs((after[1] - after[0]) - (before[1] - before[0])) < 1e-6, "pan changed zoom"
+assert abs(sum(after) / 2 - ed3.cursor_time) < 1e-6, "cursor not centred after drag"
+
+held = ed3._xlim_get()                                  # a click must not pan
+ed3._on_press(_Ev(button=1, x=300.0, xdata=held[0] + 5, inaxes=ax))
+ed3._on_release(_Ev(button=1, x=301.0, xdata=held[0] + 5, inaxes=ax))
+assert abs(ed3.cursor_time - (held[0] + 5)) < 1e-6, "click did not move the cursor"
+assert ed3._drag is None
+print("centred cursor + drag-pan ok")
 
 print("\nALL CHECKS PASSED")
