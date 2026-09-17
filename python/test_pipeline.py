@@ -96,7 +96,7 @@ assert st.tolist() == [bz.NREM, bz.NREM, bz.REM, bz.WAKE, bz.WAKE, bz.NREM]
 # legacy light/drowsy (2) -> awake; intermediate (4) is scored, so it survives
 from state_editor import sanitize_states, KEY_TO_STATE
 assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 4, 5]
-assert KEY_TO_STATE == {"0": 0, "1": 1, "2": 3, "3": 5, "4": 4}
+assert KEY_TO_STATE == {"1": 1, "2": 3, "3": 5, "4": 4, "5": 0}   # 0 = reset view
 print("Buzsáki 3-state clustering + legacy-code mapping ok")
 
 # Resuming a scored file: the scorer name comes from the file (no prompt) and
@@ -211,5 +211,37 @@ moved = ed4.cursor_time - c0
 assert 0 < moved < ed4.eeg_show, f"raw drag should scrub forward a little: {moved}"
 assert abs(sum(ed4._xlim_get()) / 2 - ed4.cursor_time) < 1e-6, "view lost the cursor"
 print(f"raw-trace drag ok (scrubbed {moved:.3f} s per 20 px)")
+
+# Zooming keeps the width it is asked for: a full-span window centred near an
+# end slides into range instead of being trimmed (which used to strand the
+# Window slider below full width, with no way back).
+full = ed4.lims[1] - ed4.lims[0]
+ed4.cursor_time = ed4.lims[0] + 0.1 * full          # well off-centre
+ed4._zoom_to(30)
+for _ in range(3):                                   # repeated asks must not decay
+    ed4._on_win_slider(full)
+    lo, hi = ed4._xlim_get()
+    assert abs((hi - lo) - full) < 1e-6, f"window stuck at {hi - lo:.0f} of {full:.0f} s"
+
+ed4._set_xlim(ed4.lims[1] - 20, ed4.lims[1])         # zoomed in at the far end
+ed4.cursor_time = ed4.lims[1] - 10
+for _ in range(25):
+    ed4._on_scroll(_Ev(button="down", inaxes=ed4.ax_spec[0], xdata=ed4.cursor_time))
+lo, hi = ed4._xlim_get()
+assert abs((hi - lo) - full) < 1e-6, f"scrolling out reached only {hi - lo:.0f} s"
+ed4._zoom_to(1e9)                                    # absurd width clamps to the span
+assert abs(np.diff(ed4._xlim_get())[0] - full) < 1e-6
+print("zoom reaches full width from any cursor position")
+
+# `0` resets the view to the whole recording; `5` arms erase
+ed4._zoom_to(25)
+ed4._on_key(_Ev(key="0"))
+lo, hi = ed4._xlim_get()
+assert abs((hi - lo) - full) < 1e-6, "key 0 did not reset the view"
+assert ed4.current_state is None, "key 0 must not arm a state"
+ed4._on_key(_Ev(key="5"))
+assert ed4.current_state == 0, "key 5 should arm erase"
+ed4._on_key(_Ev(key="c"))
+print("key 0 = reset view, key 5 = erase")
 
 print("\nALL CHECKS PASSED")

@@ -84,7 +84,7 @@ channels or the sampling rate).
 
 | Key | Action |
 |-----|--------|
-| `1`–`4` (awake/NREM/REM/intermediate, `0` = erase) | Arm a state, then mark the two time bounds with `Space` `Space` |
+| `1`–`4` (awake/NREM/REM/intermediate, `5` = erase) | Arm a state, then mark the two time bounds with `Space` `Space` |
 | `c` | Cancel the current state action |
 | Left / Right | Step the time cursor; the view scrolls to keep it centred |
 | Shift + Left / Right | Pan by a whole window |
@@ -95,13 +95,13 @@ channels or the sampling rate).
 | Up / Down | Increase / decrease spectrogram contrast |
 | `-` / `=` | Decrease / increase the LFP display width |
 | Single click (no armed state) | Move the cursor there — the view re-centres on it |
-| `r` | Reset the time axis to the full extent |
+| `0` / `r` | Reset the time axis to the whole recording |
 | `u` | Undo the last state change |
 | `e` / `d` | Toggle add / delete **event** mode, then click to place/remove a mark |
 | `[` / `]` | Select the previous / next event number (1–10) |
 | `n` / `p` | Jump to the next / previous event of the active number |
-| `s` | Save states |
-| `l` | Load states |
+| `s` | Save now (closing the window saves by itself) |
+| `l` | Load a saved scoring |
 | `h` | Toggle the on-screen help overlay |
 
 Scoring inside an existing epoch can strand a sliver of the old label: any run
@@ -113,8 +113,9 @@ absorbed. The time cursor is drawn on every panel, the hypnogram bars included.
 The editor also shows an always-visible **state-colour legend** and a **live
 info panel** (armed state, current time, recording length, percent scored, and
 per-state bin counts). Each spectrogram and LFP trace is labelled with its
-channel number, the window title shows a `*` when there are unsaved changes, and
-closing with unsaved work prompts you to save first.
+channel number, and the status bar names the file the scoring will be written
+to. There is no Save button and no unsaved marker: closing the window saves the
+scoring automatically (you are only prompted if that write fails).
 
 ## Output
 

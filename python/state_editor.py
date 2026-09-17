@@ -65,9 +65,10 @@ STATE_COLORS = {
 STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 4: "intermediate", 5: "REM"}
 DEFAULT_STATE = 3     # every bin starts as NREM; scoring re-labels the rest
 STATE_TICKS = ([1, 3, 4, 5], ["W", "N", "I", "R"])   # hypnogram y-axis
-# keyboard -> state code: sequential keys 1-4, decoupled from the stored
-# HM codes (1/3/4/5) so the .mat files stay MATLAB-compatible
-KEY_TO_STATE = {"0": 0, "1": 1, "2": 3, "3": 5, "4": 4}
+# keyboard -> state code: sequential keys 1-4 (erase on 5), decoupled from the
+# stored HM codes (1/3/4/5) so the .mat files stay MATLAB-compatible.
+# 0 is not a state key — it resets the view to the whole recording.
+KEY_TO_STATE = {"1": 1, "2": 3, "3": 5, "4": 4, "5": 0}
 STATE_TO_KEY = {v: k for k, v in KEY_TO_STATE.items()}
 
 
@@ -124,7 +125,7 @@ HELP_LINES = [
     ("1-4", "arm awake/NREM/REM/intermediate (then Space Space to score)"),
     ("← →", "move the time cursor (1 s per press)"),
     ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
-    ("0", "arm 'no state' (erase)"),
+    ("5", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
     ("click", "move the cursor here — it re-centres (never scores)"),
     ("drag", "pan the window (on a raw LFP trace: scrub finely)"),
@@ -133,7 +134,7 @@ HELP_LINES = [
     ("scroll", "zoom in / out around the cursor"),
     ("↑ ↓", "spectrogram contrast up / down"),
     ("- / =", "narrow / widen the LFP window"),
-    ("r", "reset time axis to full extent"),
+    ("0 / r", "reset the view to the whole recording"),
     ("u", "undo last state change"),
     ("", ""),
     ("e", "toggle add-event mode; click to drop a mark"),
@@ -141,7 +142,8 @@ HELP_LINES = [
     ("[ / ]", "previous / next event number (1-10)"),
     ("n / p", "jump to next / previous event"),
     ("", ""),
-    ("s / l", "save / load states + events"),
+    ("s", "save now (closing saves by itself)"),
+    ("l", "load a saved scoring"),
     ("h", "toggle this help"),
 ]
 
@@ -297,7 +299,7 @@ class StateEditor:
         self.current_state = None
         self.pending_bound = None
         self.pending_line = []
-        self.dirty = False          # unsaved changes?
+        self.dirty = False          # edited since the last save (not shown: saving is automatic)
         self.help_visible = False
         # movable time cursor (← → step it, space confirms epoch bounds)
         self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
@@ -463,8 +465,6 @@ class StateEditor:
             a.triggered.connect(lambda: (fn(), self.canvas.setFocus()))
             tb.addAction(a)
 
-        add("💾  Save .npy", self.save_states_npz, "Save scoring as NumPy .npz")
-        add("💾  Save .mat", self.save_states, "Save scoring as MATLAB -states.mat  (s)")
         add("📂  Load", self.load_states, "Load a saved .npz / .mat scoring  (l)")
         tb.addSeparator()
         add("↺  Reset view",
@@ -491,7 +491,8 @@ class StateEditor:
                                      " padding-right:10px;")
         tb.addWidget(self.match_lbl)
         self.win.statusBar().setStyleSheet("color:#5a6069;")
-        self.win.statusBar().showMessage("Ready — no unsaved changes")
+        self.win.statusBar().showMessage(
+            "Ready — your scoring is saved automatically when you close this window")
 
         # second row: colour-coded state-arm toggle buttons (click to arm, click
         # again to un-arm). They stay in sync with the 0-4 / c keyboard shortcuts.
@@ -848,8 +849,7 @@ class StateEditor:
     def _on_win_slider(self, val):
         if self._slider_guard:
             return
-        half = float(val) / 2
-        self._set_xlim(self.cursor_time - half, self.cursor_time + half)
+        self._zoom_to(val)
 
     def _on_pos_slider(self, val):
         if self._slider_guard:
@@ -1001,10 +1001,9 @@ class StateEditor:
             extra = f" - Add Event {self.event_num} (click to place)"
         elif self.event_mode == "delete":
             extra = f" - Delete Event {self.event_num} (click near a mark)"
-        star = "*" if getattr(self, "dirty", False) else ""
         src = (f" — {os.path.basename(self.results_path)}"
                if getattr(self, "results_path", None) else "")
-        self._set_window_title(f"States: {self.base_name}{star}{src}{extra}")
+        self._set_window_title(f"States: {self.base_name}{src}{extra}")
         self._sync_state_buttons()
         self._update_match()
         self._update_statusbar()
@@ -1046,17 +1045,18 @@ class StateEditor:
         self.match_lbl.setText(f"Auto ↔ Manual:  {agree:.0f}%   {ktxt}   (n={n})  ")
 
     def _update_statusbar(self):
-        """Reflect scored coverage, dirty state, scorer and save target in the
-        Qt status bar."""
+        """Reflect scored coverage, scorer and save target in the Qt status bar.
+
+        There is no saved/unsaved flag: closing the window writes the scoring,
+        so the only thing worth showing is where it will land."""
         if getattr(self, "win", None) is None:
             return
         scored, total = self._coverage()
         pct = 100.0 * scored / total if total else 0.0
-        flag = "● unsaved changes" if self.dirty else "✓ saved"
         who = f"   ·   labeled by {self.labeled_by}" if self.labeled_by else ""
-        where = (f"   ·   → {os.path.basename(self.results_path)}"
-                 if self.results_path else "")
-        self.win.statusBar().showMessage(f"{flag}   ·   scored {pct:.1f}%   ·   "
+        where = (f"   ·   saves to {os.path.basename(self.results_path)}"
+                 if self.results_path else "   ·   saves on close")
+        self.win.statusBar().showMessage(f"scored {pct:.1f}%   ·   "
                                          f"{len(self.events)} event(s){who}{where}")
 
     def _xlim_get(self):
@@ -1122,6 +1122,20 @@ class StateEditor:
         start = min(max(start, self.lims[0]),
                     max(self.lims[0], self.lims[1] - width))
         self.cursor_time = float(start + width / 2)
+        self._set_xlim(start, start + width)
+
+    def _zoom_to(self, width, centre=None):
+        """Show ``width`` seconds around ``centre`` (the cursor by default).
+
+        The window is *slid* inside the recording when the centre sits near an
+        end, never trimmed to fit: asking for the full span always gives the
+        full span. (Trimming is what made the Window slider stick — a full-width
+        window centred 40 s into an hour got clipped to 40 s + half a window,
+        the slider re-synced to that, and full width became unreachable.)"""
+        span = self.lims[1] - self.lims[0]
+        width = min(max(float(width), min(MIN_VIEW_WINDOW, span)), span)
+        centre = self.cursor_time if centre is None else float(centre)
+        start = min(max(centre - width / 2, self.lims[0]), self.lims[1] - width)
         self._set_xlim(start, start + width)
 
     def _centre_view(self):
@@ -1207,7 +1221,7 @@ class StateEditor:
         elif k == "end":
             lo, hi = self._xlim_get()
             self._pan_to(self.lims[1] - (hi - lo), hi - lo)
-        elif k == "r":
+        elif k in ("r", "0"):           # back to the whole recording
             self._pan_to(self.lims[0], self.lims[1] - self.lims[0])
         elif k in ("up", "down"):
             delta = -0.1 if k == "up" else 0.1
@@ -1220,7 +1234,7 @@ class StateEditor:
         elif k == "u":
             self._undo()
         elif k == "s":
-            self.save_states()
+            self.save_results()         # the same save that closing performs
         elif k == "l":
             self.load_states()
         elif k == "h":
@@ -1250,9 +1264,7 @@ class StateEditor:
         if event.inaxes is None:
             return
         lo, hi = self._xlim_get()
-        factor = 0.8 if event.button == "up" else 1.25
-        half = (hi - lo) * factor / 2
-        self._set_xlim(self.cursor_time - half, self.cursor_time + half)
+        self._zoom_to((hi - lo) * (0.8 if event.button == "up" else 1.25))
 
     def _in_time_panel(self, event):
         """True for the panels sharing the main time axis (spectrograms, motion

@@ -102,7 +102,7 @@ keyboard/mouse controls.
 ### Scoring in the editor
 
 - **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `2`
-  NREM, `3` REM, `4` intermediate, `0` erase); click again / press `c` to
+  NREM, `3` REM, `4` intermediate, `5` erase); click again / press `c` to
   un-arm.
 - **Score an epoch**: with a state armed, press `Space` at the start and again
   at the end to label that span (minimum 10 s). Clicking never scores.
@@ -117,11 +117,15 @@ keyboard/mouse controls.
   brings that moment to the centre, and **dragging** pans: on a spectrogram /
   motion / state panel it moves the window like the Position slider, on a raw
   LFP trace it scrubs finely (one panel width = the raw window's few seconds).
-  Scroll zooms about the cursor, `Shift+← →` pans a whole window, `Home`/`End`
-  jump to the ends, `r` resets the view. (Near either end of the recording the
-  view runs out of room, so the cursor sits off-centre.)
-- **Save / load**: the toolbar has **Save .npy** (NumPy `.npz`), **Save .mat**
-  (`s`), and **Load** (reads either format, `l`). `u` undoes the last change.
+  Scroll and the **Window** slider zoom about the cursor, `Shift+← →` pans a
+  whole window, `Home`/`End` jump to the ends, and **`0`** (or `r`) snaps back
+  to the whole recording. (Near either end of the recording the view runs out
+  of room, so the cursor sits off-centre.)
+- **Saving is automatic**: closing the editor writes the scoring (both `.npz`
+  and `.mat`) — to the file you resumed from, or a new dated one — so there is
+  no Save button and nothing to remember. `s` forces that same save mid-session
+  if you want a checkpoint, **Load** (`l`) opens an earlier scoring, and `u`
+  undoes the last change.
 
 ## Output
 
