@@ -143,7 +143,7 @@ write `LFP_Output/` with all the old files alongside the NWB.
 **Naming.** The file is `<Rat>_<YYYYMMDD>.nwb`, plus the session folder's phase
 postfix when it has one: `Rat1_HM_Neurons_20260212_105706_post/` yields
 `Rat1_20260212_post.nwb`, so same-day sessions never collide. Step 8 and step w
-both derive it through `sleep_nwb.session_nwb_name`, so they always land on one
+both derive it through `sleep_nwb_store.session_nwb_name`, so they always land on one
 file.
 
 **Time axis.** `lfp_timestamps.npy` held `np.arange(n_samples) / fs`. The NWB
@@ -166,7 +166,7 @@ instead of piling up a new file per day.
 
 ### Continuing someone's scoring
 
-Card 1 has a **State scored by** dropdown listing every scoring already in the
+Card 1 has a **Reload state scored by** dropdown listing every scoring already in the
 NWB (newest first). It starts blank — nothing is resumed by accident. Pick a
 scorer and their labels load, their name carries through (you are *not* asked
 for a name again), and saving updates that same entry.
@@ -408,11 +408,9 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `setup_gui.py` | Tkinter setup launcher — port of `Sleep_score_HM_neuron.m` |
 | `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` (+ auto-label panel) |
 | `processing.py` | Preprocessing + multitaper spectrogram (reads LFP from NWB or `.npy`) |
-| `sleep_nwb.py` | The session-NWB layout: inputs, scorings, label stripping (kept identical in the tracker repo) |
-| `isolate_labels.py` | Split a session into a label-free student copy + the ground truth |
 | `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
-| `sleep_nwb.py` | Session NWB I/O — the recording in, each scoring out |
+| `sleep_nwb_store.py` | Session NWB I/O — the recording in, each scoring out |
 | `import_labels.py` | Put `results/` scorings into the session NWB |
 | `isolate_labels.py` | Take scorings back out (student copy + ground truth) |
 | `test_pipeline.py` | Headless smoke test (`python test_pipeline.py`) |

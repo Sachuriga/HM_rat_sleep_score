@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sleep_nwb as snwb                                     # noqa: E402
+import sleep_nwb_store as snwb                                     # noqa: E402
 
 RESULTS_GLOB = "results_*"
 RESULTS_DIRNAME = "results"

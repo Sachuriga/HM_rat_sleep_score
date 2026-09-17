@@ -91,7 +91,7 @@ PAN_FRAC = 0.15       # fraction of the window moved by arrow keys
 MIN_VIEW_WINDOW = 10.0  # smallest main-view window (s)
 MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span >= 10 s
 MIN_RUN_S = 5.0         # runs left shorter than this are absorbed by a neighbour
-EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
+EEG_STEPS = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60]   # '-'/'=' LFP width steps
 ARROW_STEP = 1        # bins the time cursor moves per ← → press (1 bin = 1 s)
 DRAG_PX = 3           # pointer travel (px) past which a press is a drag, not a click
 EMG_SENS = 0.8        # EMG 1/0-band threshold multiplier (<1 = more sensitive)
@@ -281,7 +281,7 @@ class StateEditor:
         self.eeg = [(np.asarray(e, dtype=float)[::DOWNSAMPLE] / 2150.0) / 1000.0
                     for e in raw_eeg]
         self.eeg_x = np.arange(1, self.eeg[0].size + 1) / (self.eeg_fs / DOWNSAMPLE)
-        self.eeg_show = 2.0        # seconds of LFP shown
+        self.eeg_show = 10.0       # seconds of LFP shown
 
         # --- motion (z-scored) ----------------------------------------------
         m = np.asarray(motion, dtype=float).ravel()
@@ -1546,7 +1546,7 @@ class StateEditor:
         if not self.nwb_path or not os.path.isfile(self.nwb_path):
             return False
         try:
-            import sleep_nwb as snwb
+            import sleep_nwb_store as snwb
             events = (np.array(self.events, dtype=float) if self.events
                       else np.zeros((0, 2)))
             name = snwb.write_scoring(

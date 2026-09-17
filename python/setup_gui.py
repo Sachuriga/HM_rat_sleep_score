@@ -1,6 +1,6 @@
 """Setup GUI - Python port of ``Sleep_score_HM_neuron.m`` (PyQt6).
 
-Pick an LFP folder, enter three channel numbers, auto-detect the motion/EMG
+Pick a session folder, enter three channel numbers, auto-detect the motion/EMG
 file, choose an output folder and parameters, then launch the state editor.
 """
 
@@ -249,13 +249,16 @@ class SetupGUI(QMainWindow):
         # ============ Card 1: data sources ================================
         c1, box = self._card(1, "Data sources")
 
-        box.addWidget(self._field_label("LFP output folder"))
+        box.addWidget(self._field_label("Session folder"))
         self.lfp_edit = QLineEdit()
         self.lfp_dot = self._dot()
         box.addLayout(self._path_row(
             self.lfp_edit, self._sel_lfp, self.lfp_dot,
-            "folder containing lfp_data.npy or channels_npy/",
-            "The exported LFP folder for this session."))
+            "folder containing the session .nwb",
+            "The session folder written by tracker step 8 — its .nwb holds the "
+            "LFP, EMG, motion and every scoring.\n"
+            "Older sessions exported as loose .npy (lfp_data.npy / channels_npy/) "
+            "still work."))
         self.info_label = QLabel("")
         self.info_label.setObjectName("Hint")
         self.info_label.setWordWrap(True)
@@ -263,13 +266,15 @@ class SetupGUI(QMainWindow):
 
         box.addWidget(self._divider())
 
-        box.addWidget(self._field_label("Motion / EMG file"))
+        box.addWidget(self._field_label("Motion / EMG file  (optional)"))
         self.emg_edit = QLineEdit()
         self.emg_dot = self._dot()
         box.addLayout(self._path_row(
             self.emg_edit, self._sel_emg, self.emg_dot,
-            "auto-detected from the LFP folder, or browse a .npy",
-            "Motion / EMG signal used to separate wake from sleep."))
+            "taken from the .nwb — or browse a .npy to override",
+            "Motion / EMG signal used to separate wake from sleep.\n"
+            "The session .nwb already carries it, so this only needs setting to "
+            "override it or for an older .npy-only session."))
         self.emg_auto = QLabel("")
         self.emg_auto.setObjectName("Hint")
         box.addWidget(self.emg_auto)
@@ -281,12 +286,14 @@ class SetupGUI(QMainWindow):
         self.out_dot = self._dot()
         box.addLayout(self._path_row(
             self.out_edit, self._sel_out, self.out_dot,
-            "where -states.mat and the cache are written",
-            "Results (scoring, cache) are saved here. Defaults to the LFP folder."))
+            "where the spectrogram cache and backup files are written",
+            "The scoring itself goes into the session .nwb. This folder takes the "
+            "spectrogram cache and the .npz/.mat backup copies.\n"
+            "Defaults to the session folder."))
 
         box.addWidget(self._divider())
 
-        box.addWidget(self._field_label("State scored by"))
+        box.addWidget(self._field_label("Reload state scored by"))
         prow = QHBoxLayout()
         prow.setSpacing(8)
         self.prev_combo = QComboBox()
@@ -301,7 +308,7 @@ class SetupGUI(QMainWindow):
         prow.addWidget(self.prev_dot)
         box.addLayout(prow)
         self.prev_hint = self._hint(
-            "Select the LFP folder first — scorings are read from the session .nwb.")
+            "Select the session folder first — scorings are read from its .nwb.")
         box.addWidget(self.prev_hint)
         v.addWidget(c1)
 
@@ -333,7 +340,8 @@ class SetupGUI(QMainWindow):
         self.fs_edit = QLineEdit("1500")
         self.fs_edit.setFixedWidth(90)
         self.fs_edit.setValidator(QDoubleValidator(1.0, 1e6, 3, self))
-        self.fs_edit.setToolTip("LFP sampling rate. Auto-filled from lfp_timestamps.npy when sensible.")
+        self.fs_edit.setToolTip("LFP sampling rate. Auto-filled from the session "
+                                ".nwb (or lfp_timestamps.npy) when sensible.")
         grid.addWidget(self.fs_edit, 0, 1)
         grid.addWidget(self._field_label("Session name"), 0, 2)
         self.name_edit = QLineEdit("HM_neurons")
@@ -403,7 +411,7 @@ class SetupGUI(QMainWindow):
         fb = QVBoxLayout(footer)
         fb.setContentsMargins(22, 6, 22, 16)
         fb.setSpacing(10)
-        self.status = QLabel("Ready. Select an LFP folder to begin.")
+        self.status = QLabel("Ready. Select a session folder to begin.")
         self.status.setWordWrap(True)
         self.status.setStyleSheet(f"color: {INK}; font-size: 12px;")
         fb.addWidget(self.status)
@@ -445,7 +453,7 @@ class SetupGUI(QMainWindow):
             self.launch_btn.setText("▶  Launch State Editor")
         else:
             missing = [name for name, val in
-                       [("LFP folder", self.lfp_folder),
+                       [("session folder", self.lfp_folder),
                         ("motion/EMG file", self.emg_file or self.motion_from_nwb),
                         ("output folder", self.out_folder)] if not val]
             self.launch_btn.setText(f"Launch State Editor  (set {', '.join(missing)})")
@@ -541,7 +549,7 @@ class SetupGUI(QMainWindow):
         self.lfp_edit.setText(folder)
         self.lfp_source = find_lfp_source(folder)
         if self.lfp_source is None:
-            self._set_status("Warning: no lfp_data.npy or channels_npy/ found here.", WARN)
+            self._set_status("Warning: no .nwb (or lfp_data.npy / channels_npy/) found here.", WARN)
             self.info_label.setText("")
             self._set_dot(self.lfp_dot, "warn")
         else:
@@ -572,7 +580,7 @@ class SetupGUI(QMainWindow):
         # run off that single file alone.
         self.motion_from_nwb = False
         if not self.emg_file:
-            import sleep_nwb as snwb
+            import sleep_nwb_store as snwb
             found = snwb.find_session_nwb(folder)
             if found is not None:
                 inputs = None
@@ -598,7 +606,7 @@ class SetupGUI(QMainWindow):
             self._set_dot(self.out_dot, "ok")
 
         # the session NWB written by tracker step 8 — the store for scorings
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
         found = snwb.find_session_nwb(folder)
         self.nwb_path = str(found) if found else ""
         self._reload_scorings()
@@ -626,12 +634,12 @@ class SetupGUI(QMainWindow):
             self._update_ready()
 
     def _reload_scorings(self):
-        """Refill the "State scored by" dropdown from the session NWB.
+        """Refill the "Reload state scored by" dropdown from the session NWB.
 
         Always starts blank (a fresh scoring) so nothing is resumed by accident;
         every scorer already stored in the NWB follows, newest first.
         """
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
 
         self.scorings = []
         self.prev_scoring = None
@@ -650,10 +658,10 @@ class SetupGUI(QMainWindow):
 
         if not self.lfp_folder:
             self.prev_hint.setText(
-                "Select the LFP folder first — scorings are read from the session .nwb.")
+                "Select the session folder first — scorings are read from its .nwb.")
         elif not self.nwb_path:
             self.prev_hint.setText(
-                "No .nwb in this folder — run tracker step 8 to create it. "
+                "No .nwb here — run tracker step 8 to create it. "
                 "Scoring still works; results are saved to the results/ folder.")
         elif self.scorings:
             self.prev_hint.setText(
@@ -677,7 +685,7 @@ class SetupGUI(QMainWindow):
     # ------------------------------------------------------------------ launch
     def _launch(self):
         if not self.lfp_folder:
-            return self._set_status("Error: select an LFP folder.", ERR)
+            return self._set_status("Error: select a session folder.", ERR)
         if not self.emg_file and not self.motion_from_nwb:
             return self._set_status("Error: select a motion/EMG file.", ERR)
         if not self.out_folder:
@@ -718,7 +726,7 @@ class SetupGUI(QMainWindow):
         source = self.lfp_source or find_lfp_source(self.lfp_folder)
         if source is None:
             return self._set_status(
-                f"Error: no lfp_data.npy or channels_npy/ found in {self.lfp_folder}", ERR)
+                f"Error: no .nwb, lfp_data.npy or channels_npy/ found in {self.lfp_folder}", ERR)
 
         cpath = cache_path(self.out_folder, base)
         cached = None
@@ -770,7 +778,7 @@ class SetupGUI(QMainWindow):
         # through, so the editor neither asks for a name nor starts a new entry.
         states, labeled_by = None, None
         if self.prev_scoring:
-            import sleep_nwb as snwb
+            import sleep_nwb_store as snwb
             scorer = self.prev_scoring.get("scorer")
             self._set_status(f"Loading {scorer}'s scoring from "
                              f"{os.path.basename(self.nwb_path)} ...", "#0000aa")
@@ -811,7 +819,7 @@ class SetupGUI(QMainWindow):
         Used when the folder has no motion ``.npy`` — everything the scorer
         needs is then read from the one NWB.
         """
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
 
         inputs = None
         try:
@@ -881,7 +889,7 @@ class SetupGUI(QMainWindow):
         # Prefer the session NWB — it is the only source for a folder that holds
         # nothing but the .nwb.
         if self.nwb_path:
-            import sleep_nwb as snwb
+            import sleep_nwb_store as snwb
             inputs = None
             try:
                 inputs = snwb.read_sleep_inputs(self.nwb_path)

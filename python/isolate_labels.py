@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-import sleep_nwb as snwb
+import sleep_nwb_store as snwb
 
 
 def extract_labels(nwb_path, out_dir):

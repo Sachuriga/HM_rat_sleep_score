@@ -217,7 +217,7 @@ def output_prefix(folder):
                 return base[:-len(suffix)]
 
     try:
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
         from pynwb import NWBHDF5IO
         nwb = snwb.find_session_nwb(folder)
         if nwb is not None:
@@ -252,7 +252,7 @@ def find_lfp_source(folder: str):
     ``channels`` is the sorted list of channel numbers available to select.
     """
     try:
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
         nwb = snwb.find_session_nwb(folder)
         if nwb is not None:
             info = _nwb_lfp_info(nwb)
@@ -291,7 +291,7 @@ def load_sleep_channels(folder) -> dict:
     ``sleep_channels.npy``.
     """
     try:
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
         nwb = snwb.find_session_nwb(folder)
         if nwb is not None:
             inputs = None

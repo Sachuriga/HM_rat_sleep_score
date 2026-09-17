@@ -385,7 +385,7 @@ def _nwb_signals(lfp_dir):
         return _NWB_CACHE[key]
     out = (None, None, None, None)
     try:
-        import sleep_nwb as snwb
+        import sleep_nwb_store as snwb
         nwb = snwb.find_session_nwb(lfp_dir)
         if nwb is not None:
             inputs = snwb.read_sleep_inputs(nwb, lazy=False)

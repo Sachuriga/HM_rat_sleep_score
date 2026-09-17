@@ -1,38 +1,38 @@
-"""Shared NWB layout for sleep scoring — the contract between the tracker and
-the scoring GUI.
+"""Reading a session NWB, and storing scorings in it. The scorer's half.
 
-ONE FILE PER SESSION: ``<op>/<Rat>_<YYYYMMDD>.nwb``. The tracker's **step 8**
-creates it and writes everything the scorer needs; **step w** (behaviour /
-trials) and **step u** (units) then append to that same file in ``r+`` mode.
-Nothing rewrites it from scratch, so scorings stored inside survive the rest
-of the pipeline.
+ONE FILE PER SESSION: ``<op>/<Rat>_<YYYYMMDD>[_<phase>].nwb``, written by the
+tracker's **step 8** and appended to by **step w** (behaviour) and **step u**
+(units). Nothing rewrites it, so scorings stored inside survive the pipeline.
 
-Layout
-------
-``acquisition/``
-    ``lfp``            TimeSeries ``(n_samples, n_channels)`` in uV, per-sample
-                       timestamps (seconds). Written by step 8; step w skips it
-                       when already present.
-    ``emg_from_lfp``   TimeSeries ``(n,)`` normalised EMG-from-LFP (~5 Hz).
-    ``motion``         TimeSeries ``(n,)`` accelerometer movement magnitude.
+**This module is NOT shared with the tracker.** The tracker has its own writer
+(``src/nwb/sleep_nwb_writer.py``); the two used to be kept byte-identical, which was a
+standing trap — rename a container on one side and the other silently reads
+nothing. They are independent now because the FILE says where things live: the
+writer records the container names it used, and :func:`resolve_layout` adopts
+those names per file. A file written by a future tracker that calls the LFP
+something else is still read correctly here, with no code change.
 
-``processing/sleep/``
-    ``sleep_channels``       TimeSeries carrying the per-rat cortex / sr / pyr
-                             tetrode numbers as JSON in its ``description``.
-    ``states_<scorer>``      TimeIntervals — one row per contiguous scored epoch
-                             (``start_time``, ``stop_time``, ``state``,
-                             ``state_code``); JSON metadata in ``description``.
-    ``events_<scorer>``      TimeSeries of numbered event marks (optional).
+What this module reads (names as of layout version 1; a file may say otherwise)::
 
-A *scoring* is identified by its ``scorer`` name; re-saving under the same name
-replaces that scorer's tables, so re-opening and continuing a scoring never
-spawns a second copy. ``strip_scorings`` writes a copy with every scoring
-removed — the version to hand to students, with no ground truth in it.
+    acquisition/lfp             (n_samples, n_channels) uV
+    acquisition/emg_from_lfp    normalised EMG-from-LFP (~5 Hz)
+    acquisition/motion          accelerometer movement magnitude
+    processing/sleep/
+        layout                  the names above, as the writer recorded them
+        sleep_channels          per-rat cortex / sr / pyr tetrodes (JSON)
+        session_info            channel map, session boundaries, SNR (JSON)
+        awakeness, emg_rms, theta_delta_ratio
 
-This file is kept byte-identical in both repos:
-  * HM_Tracker_2025/src/nwb/sleep_nwb.py
-  * HM_rat_sleep_score/python/sleep_nwb.py
-Edit one, copy to the other.
+What this module writes (the scorer owns these outright — the tracker never
+touches them)::
+
+    processing/sleep/states_<scorer>   TimeIntervals, one row per scored epoch
+    processing/sleep/events_<scorer>   numbered event marks (optional)
+
+A scoring is identified by its ``scorer`` name; re-saving under the same name
+replaces that scorer's tables, so continuing a scoring never spawns a second
+copy. :func:`strip_scorings` writes a copy with every scoring removed — the
+version to hand to students, with no ground truth in it.
 """
 
 from __future__ import annotations
@@ -56,6 +56,8 @@ SESSION_INFO_NAME = "session_info"
 DERIVED_NAMES = ("awakeness", "emg_rms", "theta_delta_ratio")
 STATES_PREFIX = "states_"
 EVENTS_PREFIX = "events_"
+LAYOUT_NAME = "layout"          # where the contract below is recorded in the file
+LAYOUT_VERSION = 1
 
 # HM state codes, shared with the editor (1 WAKE / 3 NREM / 5 REM; 0 unscored).
 STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 4: "intermediate",
@@ -69,44 +71,47 @@ def _slug(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------- #
-#  Locating the session NWB
+#  Where things live — as the file itself declares
 # ---------------------------------------------------------------------------- #
-def folder_postfix(name_or_path) -> str:
-    """The phase token trailing a **recording name**, e.g. ``'post'``.
+# Used only for files written before the writer began recording its layout.
+# Those all predate any rename, so these names are correct for them by
+# definition. For every newer file the names come out of the file instead.
+DEFAULT_LAYOUT = {
+    "module": SLEEP_MODULE,
+    "lfp": LFP_NAME,
+    "emg": EMG_NAME,
+    "motion": MOTION_NAME,
+    "sleep_channels": SLEEP_CHANNELS_NAME,
+    "session_info": SESSION_INFO_NAME,
+    "derived": list(DERIVED_NAMES),
+}
 
-    Recordings are named ``<Rat>_<label>_<YYYYMMDD>_<HHMMSS>`` with an optional
-    phase suffix, so ``Rat5_HM_Neurons_20260807_123703_post`` gives ``'post'``
-    and ``Rat1_HM_Neurons_20260211_104846`` gives ``''``.
 
-    Take this from the recording (the ``.LFP`` folder / session name found in
-    the **ip** folder), never from the op folder — op folders are named ``op1``,
-    ``op6`` … and carry no phase. Sessions recorded on the same day are told
-    apart by this token, which is why it belongs in the NWB's name.
+def resolve_layout(nwbfile):
+    """``(sleep module, names)`` for this file — its names, not ours.
+
+    The writer records the container names it used, so this reader adopts them
+    per file instead of having to agree with the writer in advance. That is why
+    the tracker's copy of this module and this one no longer have to match: if
+    the tracker ever renames a container, files it writes say so and are still
+    read correctly here.
+
+    The module is located by the layout record itself, so even a renamed module
+    is found. Files written before the record existed fall back to
+    :data:`DEFAULT_LAYOUT`, which is exactly the layout they were written with.
     """
-    if not name_or_path:
-        return ""
-    m = re.search(r"_\d{8}_\d{6}[_-]*(.*)$", Path(str(name_or_path)).name)
-    if not m:
-        return ""
-    return re.sub(r"[^A-Za-z0-9]+", "_", m.group(1)).strip("_")
-
-
-def session_nwb_name(prefix: str, session_name=None) -> str:
-    """The session NWB's filename: ``Rat6_20260629.nwb``, or
-    ``Rat5_20260807_post.nwb`` when the recording carries a phase postfix.
-
-    ``prefix`` is a step-8 file prefix (``Rat6_20260629_143022_``) and
-    ``session_name`` the recording's name (from the ip folder), whose postfix
-    is appended.
-
-    Step w does not recompute this: it looks for the file step 8 already wrote
-    (:func:`find_session_nwb`) and only falls back to a name of its own when
-    there is none — so the two can never disagree.
-    """
-    m = re.match(r"^([A-Za-z]+\d+)_(\d{8})", str(prefix or ""))
-    base = f"{m.group(1)}_{m.group(2)}" if m else "session"
-    post = folder_postfix(session_name)
-    return f"{base}_{post}.nwb" if post else f"{base}.nwb"
+    names = dict(DEFAULT_LAYOUT)
+    mod = None
+    for candidate in nwbfile.processing.values():
+        if LAYOUT_NAME in candidate.data_interfaces:
+            mod = candidate
+            stored = _read_json(candidate, LAYOUT_NAME)
+            if stored:
+                names.update({k: v for k, v in stored.items() if k in names})
+            break
+    if mod is None:                        # older file: no layout record
+        mod = nwbfile.processing.get(names["module"])
+    return mod, names
 
 
 def find_session_nwb(folder):
@@ -149,33 +154,46 @@ def read_sleep_inputs(nwb_path, lazy=True):
         except Exception:
             return None
 
-    lfp = _acq(LFP_NAME)
-    if lfp is not None:
-        out["lfp"] = lfp.data if lazy else np.asarray(lfp.data)
-        out["fs"] = _series_rate(lfp)
-        out["lfp_timestamps"] = _series_times(lfp, lfp.data.shape[0])
-    else:
-        out["lfp"] = out["lfp_timestamps"] = out["fs"] = None
+    # Everything below can raise (a layout mismatch, a malformed series). The
+    # handle is only handed back to the caller on success, so close it on the
+    # way out of a failure — otherwise the file stays open read-only and the
+    # next writer cannot reopen it.
+    try:
+        # the names come from the file, so this reader never has to agree with
+        # whatever wrote it — see resolve_layout()
+        mod, names = resolve_layout(nwbfile)
+        out["layout"] = names
 
-    for key, name in (("emg", EMG_NAME), ("motion", MOTION_NAME)):
-        series = _acq(name)
-        if series is None:
-            out[key] = out[f"{key}_timestamps"] = None
-            continue
-        values = np.asarray(series.data[:]).ravel()
-        out[key] = values
-        out[f"{key}_timestamps"] = _series_times(series, values.size)
+        lfp = _acq(names["lfp"])
+        if lfp is not None:
+            out["lfp"] = lfp.data if lazy else np.asarray(lfp.data)
+            out["fs"] = _series_rate(lfp)
+            out["lfp_timestamps"] = _series_times(lfp, lfp.data.shape[0])
+        else:
+            out["lfp"] = out["lfp_timestamps"] = out["fs"] = None
 
-    mod = _sleep_module(nwbfile)
-    out["sleep_channels"] = _read_json(mod, SLEEP_CHANNELS_NAME)
-    out["session_info"] = _read_json(mod, SESSION_INFO_NAME)
-    out["derived"] = {}
-    if mod is not None:
-        for name in DERIVED_NAMES:
-            if name in mod.data_interfaces:
-                series = mod[name]
-                out["derived"][name] = (series.data if lazy
-                                        else np.asarray(series.data[:]).ravel())
+        for key in ("emg", "motion"):
+            series = _acq(names[key])
+            if series is None:
+                out[key] = out[f"{key}_timestamps"] = None
+                continue
+            values = np.asarray(series.data[:]).ravel()
+            out[key] = values
+            out[f"{key}_timestamps"] = _series_times(series, values.size)
+
+        out["sleep_channels"] = _read_json(mod, names["sleep_channels"])
+        out["session_info"] = _read_json(mod, names["session_info"])
+        out["derived"] = {}
+        if mod is not None:
+            for name in names["derived"]:
+                if name in mod.data_interfaces:
+                    series = mod[name]
+                    out["derived"][name] = (series.data if lazy
+                                            else np.asarray(series.data[:]).ravel())
+    except Exception:
+        io.close()
+        raise
+
     if not lazy:
         io.close()
         out["io"] = None
@@ -218,10 +236,16 @@ def close_inputs(inputs):
 
 
 def _sleep_module(nwbfile, create=False):
-    mod = nwbfile.processing.get(SLEEP_MODULE)
+    """The file's sleep module, located through its own layout record.
+
+    A file that names the module something else is still found, because
+    :func:`resolve_layout` looks it up by the layout marker rather than by a
+    name this code decided on.
+    """
+    mod, names = resolve_layout(nwbfile)
     if mod is None and create:
         mod = nwbfile.create_processing_module(
-            name=SLEEP_MODULE,
+            name=names["module"],
             description="Sleep scoring: per-rat channel choices and one "
                         "TimeIntervals table per scorer.")
     return mod
@@ -238,116 +262,13 @@ def _read_json(mod, name):
 
 
 # ---------------------------------------------------------------------------- #
-#  Writing the scoring inputs (tracker step 8)
-# ---------------------------------------------------------------------------- #
-def add_sleep_inputs(nwbfile, lfp=None, lfp_timestamps=None, lfp_rate=None,
-                     emg=None, emg_timestamps=None, emg_rate=None,
-                     motion=None, motion_timestamps=None, motion_rate=None,
-                     sleep_channels=None, derived=None, metadata=None,
-                     lfp_unit="uV"):
-    """Add the scorer's inputs to ``nwbfile``. Existing containers are left
-    alone, so this is safe to re-run against a session that step w already
-    populated. Returns the list of names actually added.
-
-    A signal on a uniform clock should be given a ``*_rate`` rather than an
-    explicit timestamps array: NWB then stores only the rate, which spares the
-    file an 8-byte-per-sample time axis (hundreds of MB over a long session).
-
-    ``derived`` holds per-sample signals computed from the LFP
-    (``awakeness``, ``emg_rms``, ``theta_delta_ratio``), each on the LFP clock.
-    ``metadata`` holds the small session records (channel map, session
-    boundaries, cleanest channels, SNR scores) as JSON.
-    """
-    from pynwb import TimeSeries
-
-    added = []
-
-    def _series(name, data, ts, rate, unit, description):
-        ts = None if ts is None else np.asarray(ts).ravel()
-        # A chunk iterator / H5DataIO streams straight to HDF5 (a multi-GB LFP
-        # never lands in RAM); only a plain array can be length-reconciled here.
-        if isinstance(data, (np.ndarray, list, tuple)):
-            data = np.asarray(data)
-            if ts is not None and data.shape[0] != ts.shape[0]:
-                n = min(data.shape[0], ts.shape[0])
-                data, ts = data[:n], ts[:n]
-        if ts is not None:
-            kw = {"timestamps": ts}
-        else:
-            kw = {"rate": float(rate or 1.0), "starting_time": 0.0}
-        return TimeSeries(name=name, data=data, unit=unit,
-                          description=description, **kw)
-
-    def _add_acq(name, data, ts, rate, unit, description):
-        if data is None:
-            return
-        try:
-            nwbfile.get_acquisition(name)
-            return                      # already there — never clobber
-        except Exception:
-            pass
-        nwbfile.add_acquisition(_series(name, data, ts, rate, unit, description))
-        added.append(name)
-
-    _add_acq(LFP_NAME, lfp, lfp_timestamps, lfp_rate, lfp_unit,
-             "LFP voltage, one column per channel (see sleep/session_info "
-             "for the channel map).")
-    _add_acq(EMG_NAME, emg, emg_timestamps, emg_rate, "normalized",
-             "EMG-from-LFP (Buzsaki cross-channel correlation), 0-1 normalised.")
-    _add_acq(MOTION_NAME, motion, motion_timestamps, motion_rate, "g",
-             "Accelerometer (IMU) movement magnitude.")
-
-    if sleep_channels or derived or metadata:
-        mod = _sleep_module(nwbfile, create=True)
-
-    if sleep_channels and SLEEP_CHANNELS_NAME not in mod.data_interfaces:
-        mod.add(TimeSeries(
-            name=SLEEP_CHANNELS_NAME, data=[0], unit="n/a", rate=1.0,
-            description=json.dumps(_jsonable(dict(sleep_channels)))))
-        added.append(SLEEP_CHANNELS_NAME)
-
-    for name, spec in (derived or {}).items():
-        if spec is None or name in mod.data_interfaces:
-            continue
-        data, rate, unit, desc = (spec if isinstance(spec, tuple)
-                                  else (spec, lfp_rate, "a.u.", f"{name} (per LFP sample)."))
-        if data is None:
-            continue
-        mod.add(_series(name, data, None, rate, unit, desc))
-        added.append(name)
-
-    if metadata and SESSION_INFO_NAME not in mod.data_interfaces:
-        mod.add(TimeSeries(name=SESSION_INFO_NAME, data=[0], unit="n/a", rate=1.0,
-                           description=json.dumps(_jsonable(dict(metadata)))))
-        added.append(SESSION_INFO_NAME)
-    return added
-
-
-def _jsonable(v):
-    """Make numpy scalars / arrays / nested containers JSON-serialisable."""
-    if isinstance(v, np.integer):
-        return int(v)
-    if isinstance(v, np.floating):
-        return float(v)
-    if isinstance(v, np.ndarray):
-        return [_jsonable(x) for x in v.tolist()]
-    if isinstance(v, dict):
-        return {str(k): _jsonable(x) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_jsonable(x) for x in v]
-    if isinstance(v, (str, int, float, bool)) or v is None:
-        return v
-    return str(v)
-
-
-# ---------------------------------------------------------------------------- #
 #  Scorings
 # ---------------------------------------------------------------------------- #
 def list_scorings(nwb_path):
     """Every scoring in the file, newest first.
 
     Each entry is a dict with ``scorer``, ``date``, ``n_bins``, ``name`` (the
-    NWB table name) and ``label`` (what the "State scored by" dropdown shows).
+    NWB table name) and ``label`` (what the "Reload state scored by" dropdown shows).
     """
     from pynwb import NWBHDF5IO
 
@@ -516,13 +437,16 @@ def _h5_delete(nwb_path, names):
         return []
     deleted = []
     with h5py.File(str(nwb_path), "r+") as f:
-        mod = f.get(f"/processing/{SLEEP_MODULE}")
-        if mod is None:
+        processing = f.get("/processing")
+        if processing is None:
             return []
-        for name in names:
-            if name in mod:
-                del mod[name]
-                deleted.append(name)
+        # Search every processing module rather than assuming the sleep module's
+        # name — the file decides what it is called (see resolve_layout).
+        for mod in processing.values():
+            for name in names:
+                if name in mod:
+                    del mod[name]
+                    deleted.append(name)
     return deleted
 
 
@@ -548,8 +472,6 @@ def strip_scorings(nwb_path, out_path, keep=()):
     ``keep`` optionally names scorers to retain (e.g. a demo scoring). Returns
     the list of scorer names that were removed.
     """
-    from pynwb import NWBHDF5IO
-
     out_path = Path(out_path)
     if out_path.resolve() == Path(nwb_path).resolve():
         raise ValueError("out_path must differ from nwb_path")
