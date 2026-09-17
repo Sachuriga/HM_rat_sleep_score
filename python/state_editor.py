@@ -89,6 +89,7 @@ DOWNSAMPLE = 4        # plot every Nth LFP sample
 PAN_FRAC = 0.15       # fraction of the window moved by arrow keys
 MIN_VIEW_WINDOW = 10.0  # smallest main-view window (s)
 MIN_EPOCH_S = 10.0      # smallest scored epoch (s) — manual assignments span >= 10 s
+MIN_RUN_S = 5.0         # runs left shorter than this are absorbed by a neighbour
 EEG_STEPS = [0.25, 0.5, 1, 2, 5, 15, 30, 60]   # '-'/'=' LFP width steps
 ARROW_STEP = 1        # bins the time cursor moves per ← → press (1 bin = 1 s)
 DRAG_PX = 3           # pointer travel (px) past which a press is a drag, not a click
@@ -126,7 +127,7 @@ HELP_LINES = [
     ("0", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
     ("click", "move the cursor here — it re-centres (never scores)"),
-    ("drag", "pan the window along time (like the Position slider)"),
+    ("drag", "pan the window (on a raw LFP trace: scrub finely)"),
     ("Shift+← →", "pan the window left / right"),
     ("Home / End", "jump to start / end"),
     ("scroll", "zoom in / out around the cursor"),
@@ -145,6 +146,47 @@ HELP_LINES = [
 ]
 
 EVENT_COLOR = "magenta"
+
+
+def state_runs(states):
+    """Yield ``(start, end_exclusive, value)`` for each contiguous run."""
+    states = np.asarray(states)
+    n = states.size
+    if n == 0:
+        return
+    start = 0
+    for i in range(1, n + 1):
+        if i == n or states[i] != states[start]:
+            yield start, i, int(states[start])
+            start = i
+
+
+def absorb_short_runs(states, min_bins):
+    """Relabel every run shorter than ``min_bins`` with its longest neighbour.
+
+    Scoring one epoch inside another leaves slivers behind — a 3 s scrap of the
+    old label stranded between two real epochs — which are too short to mean
+    anything. Each such run takes the label of whichever adjacent run lasts
+    longer (the earlier one when they tie), shortest run first, repeating until
+    nothing under ``min_bins`` is left. A recording of a single run is untouched.
+    """
+    s = np.asarray(states, dtype=int).copy()
+    if s.size == 0 or min_bins <= 1:
+        return s
+    while True:
+        runs = list(state_runs(s))
+        if len(runs) < 2:
+            break
+        short = [i for i, (a, b, _) in enumerate(runs) if b - a < min_bins]
+        if not short:
+            break
+        i = min(short, key=lambda j: runs[j][1] - runs[j][0])   # smallest blip first
+        a, b, _ = runs[i]
+        sides = [r for r in (runs[i - 1] if i else None,
+                             runs[i + 1] if i + 1 < len(runs) else None)
+                 if r is not None]
+        s[a:b] = max(sides, key=lambda r: r[1] - r[0])[2]       # ties -> earlier
+    return s
 
 
 def _labeled_by_of(data, path):
@@ -261,6 +303,9 @@ class StateEditor:
         self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
         self.cursor_time = float((self.lims[0] + self.lims[1]) / 2)
         self._drag = None           # in-progress drag-pan (see _on_press)
+        # cursor lines on the hypnogram bars; recreated whenever a bar is
+        # redrawn (ax.clear() throws the old artist away)
+        self._state_cursor = self._auto_cursor = None
         self._slider_guard = False
 
         # --- event marking state --------------------------------------------
@@ -890,6 +935,8 @@ class StateEditor:
     def _draw_state_bar(self):
         self.ax_state.clear()
         self._plot_hypnogram(self.ax_state, self.states)
+        self._state_cursor = self.ax_state.axvline(self.cursor_time, color="0.3",
+                                                   ls="--", lw=0.9, zorder=4)
         self.ax_state.set_yticks(STATE_TICKS[0])
         self.ax_state.set_yticklabels(STATE_TICKS[1], fontsize=7)
         self.ax_state.set_xticks([])
@@ -920,15 +967,7 @@ class StateEditor:
     @staticmethod
     def _state_runs(states):
         """Yield (start, end_exclusive, value) for each contiguous run."""
-        states = np.asarray(states)
-        n = states.size
-        if n == 0:
-            return
-        start = 0
-        for i in range(1, n + 1):
-            if i == n or states[i] != states[start]:
-                yield start, i, int(states[start])
-                start = i
+        return state_runs(states)
 
     def _draw_auto_bar(self):
         """Stepped hypnogram of the provided auto-scored (Buzsáki) labels."""
@@ -936,6 +975,8 @@ class StateEditor:
             return
         self.ax_auto.clear()
         self._plot_hypnogram(self.ax_auto, self.auto_states)
+        self._auto_cursor = self.ax_auto.axvline(self.cursor_time, color="0.3",
+                                                 ls="--", lw=0.9, zorder=4)
         self.ax_auto.set_yticks(STATE_TICKS[0])
         self.ax_auto.set_yticklabels(STATE_TICKS[1], fontsize=7)
         self.ax_auto.set_xticks([])
@@ -1069,6 +1110,9 @@ class StateEditor:
             self.eeg_cursor[i].set_xdata([centre, centre])
         for ln in self.cursor_lines:
             ln.set_xdata([centre, centre])
+        for ln in (self._state_cursor, self._auto_cursor):
+            if ln is not None:              # the state bars carry it too
+                ln.set_xdata([centre, centre])
 
     def _pan_to(self, start, width):
         """Move the view to ``start`` keeping ``width`` — what the Position
@@ -1218,47 +1262,65 @@ class StateEditor:
                 or (self.ax_auto is not None and event.inaxes is self.ax_auto))
 
     def _on_press(self, event):
-        """Left button down on a time panel: arm a possible drag-pan.
+        """Left button down: arm a possible drag.
 
-        Whether it turns out to be a drag or a click is decided on release, by
-        how far the pointer travelled (``DRAG_PX``)."""
-        if event.button != 1 or event.x is None or not self._in_time_panel(event):
+        On a time panel it pans the main window; on a raw-LFP trace it scrubs
+        the cursor at that panel's own (far finer) seconds-per-pixel. Which one
+        it turns out to be — drag or click — is decided on release, by how far
+        the pointer travelled (``DRAG_PX``)."""
+        if event.button != 1 or event.x is None:
             return
-        lo, hi = self._xlim_get()
-        self._drag = {"px": event.x, "start": lo, "width": hi - lo, "panned": False}
+        if self._in_time_panel(event):
+            lo, hi = self._xlim_get()
+            self._drag = {"px": event.x, "start": lo, "width": hi - lo,
+                          "ax": self.ax_spec[0], "raw": False, "panned": False}
+        elif event.inaxes in self.ax_eeg:
+            self._drag = {"px": event.x, "start": self.cursor_time,
+                          "width": self.eeg_show, "ax": event.inaxes,
+                          "raw": True, "panned": False}
 
     def _on_motion(self, event):
-        """Pointer moved with the button down: drag the window along the time
-        axis, exactly as the Position slider moves it."""
+        """Pointer moved with the button down: from a time panel this drags the
+        window along time exactly as the Position slider moves it; from a raw
+        LFP trace it scrubs the cursor and the view follows."""
         d = self._drag
         if d is None or event.x is None:
             return
         dx_px = event.x - d["px"]
         if not d["panned"] and abs(dx_px) < DRAG_PX:
             return                      # still inside the click tolerance
-        bbox = self.ax_spec[0].get_window_extent()
+        bbox = d["ax"].get_window_extent()
         if bbox.width <= 0:
             return
         d["panned"] = True
         # drag right = pull earlier time into view, like dragging a paper strip
-        self._pan_to(d["start"] - dx_px * d["width"] / bbox.width, d["width"])
+        shift = dx_px * d["width"] / bbox.width
+        if d["raw"]:                    # scrub: the cursor moves, the view follows
+            self.cursor_time = float(np.clip(d["start"] - shift, *self.lims))
+            self._centre_view()
+        else:
+            self._pan_to(d["start"] - shift, d["width"])
 
     def _on_release(self, event):
-        """Button up. A drag has already panned the view; a click (no travel)
-        moves the time cursor, or places/deletes an event when that mode is
-        armed. Epoch bounds are confirmed with Space only, never by clicking."""
+        """Button up. A drag has already moved the view; a click (no travel)
+        moves the time cursor — from a raw-LFP panel too — or places/deletes an
+        event when that mode is armed on a time panel. Epoch bounds are
+        confirmed with Space only, never by clicking."""
         d, self._drag = self._drag, None
         if d is not None and d["panned"]:
-            return                      # it was a pan, not a click
-        if event.button != 1 or event.xdata is None or not self._in_time_panel(event):
+            return                      # it was a drag, not a click
+        if event.button != 1 or event.xdata is None:
             return
-        if self.event_mode == "add":
-            self._add_event(event.xdata)
+        if self._in_time_panel(event):
+            if self.event_mode == "add":
+                self._add_event(event.xdata)
+                return
+            if self.event_mode == "delete":
+                self._delete_event(event.xdata)
+                return
+        elif event.inaxes not in self.ax_eeg:
             return
-        if self.event_mode == "delete":
-            self._delete_event(event.xdata)
-            return
-        self.cursor_time = float(event.xdata)
+        self.cursor_time = float(np.clip(event.xdata, *self.lims))
         self._centre_view()             # the clicked moment moves to the middle
 
     def _clear_pending_line(self):
@@ -1286,16 +1348,23 @@ class StateEditor:
             centre = (i0 + i1) // 2
             i0 = max(0, min(centre - min_bins // 2, self.n_bins - min_bins))
             i1 = i0 + min_bins - 1
-        self.history.append((i0, i1, self.states[i0:i1 + 1].copy()))
+        before = self.states.copy()
         self.states[i0:i1 + 1] = state
+        # tidy up any run this left shorter than MIN_RUN_S (it can reach outside
+        # [i0, i1], so undo records every bin that actually changed)
+        self.states = absorb_short_runs(
+            self.states, min(self.n_bins, max(1, int(round(MIN_RUN_S / dt)))))
+        changed = np.flatnonzero(self.states != before)
+        if changed.size:
+            self.history.append((changed, before[changed]))
         self._mark_dirty()
         self._refresh_state_bar()
 
     def _undo(self):
         if not self.history:
             return
-        i0, i1, prev = self.history.pop()
-        self.states[i0:i1 + 1] = prev
+        idx, prev = self.history.pop()
+        self.states[idx] = prev
         self._mark_dirty()
         self._refresh_state_bar()
 

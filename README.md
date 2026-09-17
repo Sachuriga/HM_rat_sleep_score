@@ -104,14 +104,22 @@ keyboard/mouse controls.
 - **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `2`
   NREM, `3` REM, `4` intermediate, `0` erase); click again / press `c` to
   un-arm.
-- **Score an epoch**: with a state armed, click two time points (or press
-  `Space` twice) to assign it to that span (minimum 10 s).
+- **Score an epoch**: with a state armed, press `Space` at the start and again
+  at the end to label that span (minimum 10 s). Clicking never scores.
+- **No stranded scraps**: scoring inside an existing epoch can leave a sliver
+  of the old label behind. Any run left **shorter than 5 s** is relabelled to
+  match whichever adjacent epoch lasts longer (the earlier one if they tie), so
+  the hypnogram never carries unusable fragments. `u` undoes the whole edit,
+  absorbed bins included.
 - **Navigate**: the time cursor is a fixed playhead that holds the **middle**
-  of the spectrograms — the data moves past it. `← →` step it, a click brings
-  that moment to the centre, and **dragging** a panel pans the window just like
-  the Position slider. Scroll zooms about the cursor, `Shift+← →` pans a whole
-  window, `Home`/`End` jump to the ends, `r` resets the view. (Near either end
-  of the recording the view runs out of room, so the cursor sits off-centre.)
+  of the view — the data moves past it, and it is drawn on every panel,
+  spectrograms, motion and the hypnogram bars alike. `← →` step it, a click
+  brings that moment to the centre, and **dragging** pans: on a spectrogram /
+  motion / state panel it moves the window like the Position slider, on a raw
+  LFP trace it scrubs finely (one panel width = the raw window's few seconds).
+  Scroll zooms about the cursor, `Shift+← →` pans a whole window, `Home`/`End`
+  jump to the ends, `r` resets the view. (Near either end of the recording the
+  view runs out of room, so the cursor sits off-centre.)
 - **Save / load**: the toolbar has **Save .npy** (NumPy `.npz`), **Save .mat**
   (`s`), and **Load** (reads either format, `l`). `u` undoes the last change.
 

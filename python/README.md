@@ -90,6 +90,7 @@ channels or the sampling rate).
 | Shift + Left / Right | Pan by a whole window |
 | Home / End | Jump to the start / end of the recording |
 | **Drag** a spectrogram/motion/state panel | Pan the window along time, like the Position slider |
+| **Drag** a raw LFP trace | Scrub the cursor at that panel's own (much finer) scale |
 | Scroll wheel | Zoom in / out (about the centred cursor) |
 | Up / Down | Increase / decrease spectrogram contrast |
 | `-` / `=` | Decrease / increase the LFP display width |
@@ -102,6 +103,12 @@ channels or the sampling rate).
 | `s` | Save states |
 | `l` | Load states |
 | `h` | Toggle the on-screen help overlay |
+
+Scoring inside an existing epoch can strand a sliver of the old label: any run
+left **shorter than 5 s** (`MIN_RUN_S`) is relabelled to match whichever
+adjacent epoch is longer — ties going to the earlier one — so the hypnogram
+holds no unusable fragments. `u` undoes the edit together with everything it
+absorbed. The time cursor is drawn on every panel, the hypnogram bars included.
 
 The editor also shows an always-visible **state-colour legend** and a **live
 info panel** (armed state, current time, recording length, percent scored, and

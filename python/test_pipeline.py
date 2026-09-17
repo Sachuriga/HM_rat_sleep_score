@@ -170,4 +170,46 @@ assert abs(ed3.cursor_time - (held[0] + 5)) < 1e-6, "click did not move the curs
 assert ed3._drag is None
 print("centred cursor + drag-pan ok")
 
+# Short runs (< MIN_RUN_S) are absorbed by whichever neighbour lasts longer
+from state_editor import absorb_short_runs, state_runs, MIN_RUN_S
+assert absorb_short_runs([1]*10 + [5]*3 + [3]*6, 5).tolist() == [1]*13 + [3]*6
+assert absorb_short_runs([1]*6 + [5]*2 + [3]*6, 5).tolist() == [1]*8 + [3]*6  # tie -> earlier
+assert absorb_short_runs([1]*8 + [3]*2 + [5]*2 + [1]*8, 5).tolist() == [1]*20  # chain
+assert absorb_short_runs([3]*4, 5).tolist() == [3]*4          # one run: untouched
+assert absorb_short_runs([], 5).tolist() == []
+
+ed4 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed4._apply_state(40, 55, 5)
+snapshot = ed4.states.copy()
+ed4._apply_state(60, 70, 1)        # leaves a 4 s scrap of NREM at 56-60 s
+runs = [(b - a, v) for a, b, v in state_runs(ed4.states)]
+assert all(n >= 5 for n, _ in runs), f"a run under 5 s survived: {runs}"
+assert (ed4.states[56:60] == 5).all(), "scrap should join the longer REM epoch"
+ed4._undo()                        # undo restores the absorbed bins too
+assert (ed4.states == snapshot).all(), "undo did not restore the absorbed scrap"
+print(f"short-run absorption ok (< {MIN_RUN_S:.0f} s)")
+
+# The cursor is drawn on the state bar(s) and tracks the others
+assert ed4._state_cursor is not None, "no cursor on the state view"
+ed4.cursor_time = float(ed4.lims[0] + (ed4.lims[1] - ed4.lims[0]) / 3)
+ed4._centre_view()
+assert abs(float(ed4._state_cursor.get_xdata()[0]) - ed4.cursor_time) < 1e-6
+ed4._refresh_state_bar()           # redrawing the bar keeps the cursor
+assert abs(float(ed4._state_cursor.get_xdata()[0]) - ed4.cursor_time) < 1e-6
+print("state-view cursor ok")
+
+# Dragging a raw-LFP trace scrubs the cursor at that panel's finer scale
+raw_ax = ed4.ax_eeg[0]
+sp = ed4.lims[1] - ed4.lims[0]
+ed4._set_xlim(ed4.lims[0], ed4.lims[0] + sp / 4)   # zoomed in, so the view can follow
+ed4._centre_view()
+c0 = ed4.cursor_time
+ed4._on_press(_Ev(button=1, x=400.0, xdata=c0, inaxes=raw_ax))
+ed4._on_motion(_Ev(button=1, x=380.0, xdata=None, inaxes=raw_ax))  # drag 20 px left
+ed4._on_release(_Ev(button=1, x=380.0, xdata=None, inaxes=raw_ax))
+moved = ed4.cursor_time - c0
+assert 0 < moved < ed4.eeg_show, f"raw drag should scrub forward a little: {moved}"
+assert abs(sum(ed4._xlim_get()) / 2 - ed4.cursor_time) < 1e-6, "view lost the cursor"
+print(f"raw-trace drag ok (scrubbed {moved:.3f} s per 20 px)")
+
 print("\nALL CHECKS PASSED")
