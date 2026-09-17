@@ -355,15 +355,17 @@ class SetupGUI(QMainWindow):
         self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
         self.emgf_edit = QLineEdit("1.0")
         self.minsec_edit = QLineEdit("10")
+        gate = ("the dip of its bimodal histogram" if _bz.MOVE_GATE_PCT is None
+                else f"the {_bz.MOVE_GATE_PCT:.0f}th percentile")
         fields = [("SW×  (NREM)", self.swf_edit,
-                   "Slow-wave threshold multiplier. ↓ = more NREM. "
-                   f"{_bz.SW_THRESH_FACTOR} matches our hand scoring; 1.0 = the raw "
-                   "histogram dip, which labels most REM as NREM."),
+                   "Slow-wave threshold multiplier. ↓ = more NREM. 1.0 = the "
+                   "histogram dip, as published. On our hand-scored session ×1.25 "
+                   "agreed better (the dip there labels most REM as NREM), but that "
+                   "did not carry over to other recordings — so set it per session."),
                   ("θ×  (REM)", self.thf_edit, "Theta threshold multiplier. ↓ = more REM."),
                   ("EMG×  (REM gate)", self.emgf_edit,
                    "Movement ceiling for REM: bins with EMG/motion above it can't be REM. "
-                   f"1.0 = the {_bz.MOVE_GATE_PCT:.0f}th percentile of the movement "
-                   "signal; ↑ = more REM."),
+                   f"1.0 = {gate} of the movement signal; ↑ = more REM."),
                   ("min ep (s)", self.minsec_edit, "Shortest epoch kept, in seconds.")]
         for i, (lbl, edit, tip) in enumerate(fields):
             head = self._field_label(lbl)
@@ -377,9 +379,10 @@ class SetupGUI(QMainWindow):
         box3.addWidget(self._hint(
             "1.0 = automatic threshold  ·  ↓SW → more NREM  ·  ↓θ → more REM  ·  ↑EMG → laxer REM gate"))
         box3.addWidget(self._hint(
-            "A sleep_score_model.npz in the LFP folder (fit_auto_score.py) scores "
-            "instead — intermediate sleep included — and these multipliers no "
-            "longer apply."))
+            "These thresholds are the published Buzsáki ones. A model fitted to "
+            "your own scoring (fit_auto_score.py) is not used here — it needs "
+            "buzsaki_score.py --model, since one fitted to a single session did "
+            "not transfer to other recordings."))
         v.addWidget(c3)
         v.addStretch(1)
 

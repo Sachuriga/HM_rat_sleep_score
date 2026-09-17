@@ -222,10 +222,11 @@ def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
     Without any movement signal, theta alone gates REM (over-calls REM — supply
     EMG or motion for a proper split).
 
-    The slow-wave and theta cutoffs are the bimodal dips scaled by ``sw_factor``
-    / ``th_factor``; the movement ceiling is ``MOVE_GATE_PCT`` of the movement
-    signal's own distribution, scaled by ``emg_factor`` (th_factor <1 = more
-    REM; emg_factor >1 = laxer movement gate on REM).
+    Every cutoff is the dip of its own bimodal histogram, as published, scaled
+    by ``sw_factor`` / ``th_factor`` / ``emg_factor`` (th_factor <1 = more REM;
+    emg_factor >1 = laxer movement gate on REM). Setting ``MOVE_GATE_PCT``
+    puts the movement ceiling at that percentile of the movement signal's own
+    distribution instead of at its dip.
     Returns ``(states, thresholds)``.
     """
     n = len(sw)
