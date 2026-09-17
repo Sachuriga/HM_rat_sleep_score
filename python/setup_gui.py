@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import sys
-import glob
 
 import numpy as np
 
@@ -136,7 +135,7 @@ class SetupGUI(QMainWindow):
         self.lfp_folder = ""
         self.emg_file = ""
         self.out_folder = ""
-        self.prev_file = ""         # previously saved -states.npz/.mat to resume from
+        self.prev_file = ""         # scoring to resume; empty = start a fresh one
         self.lfp_source = None      # dict from find_lfp_source, set on folder select
         self.sleep_channels = {}    # {role: tetrode} from sleep_channels.npy
 
@@ -188,7 +187,8 @@ class SetupGUI(QMainWindow):
         colors = {"ok": OK_GREEN, "warn": WARN, "off": "#c7ccd2"}
         dot.setStyleSheet(f"color: {colors[state]}; font-size: 14px;")
 
-    def _path_row(self, edit, browse_cb, dot, placeholder, tooltip):
+    def _path_row(self, edit, browse_cb, dot, placeholder, tooltip,
+                  clear_cb=None):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(dot)
@@ -201,6 +201,12 @@ class SetupGUI(QMainWindow):
         btn.setObjectName("Browse")
         btn.clicked.connect(browse_cb)
         row.addWidget(btn)
+        if clear_cb is not None:            # optional: empty the field again
+            clr = QPushButton("Clear")
+            clr.setObjectName("Browse")
+            clr.setToolTip("Empty this field")
+            clr.clicked.connect(clear_cb)
+            row.addWidget(clr)
         return row
 
     def _build(self):
@@ -281,8 +287,10 @@ class SetupGUI(QMainWindow):
         self.prev_dot = self._dot()
         box.addLayout(self._path_row(
             self.prev_edit, self._sel_prev, self.prev_dot,
-            "auto-detected saved -states.npz / .mat, or browse",
-            "Load an earlier scoring to continue where you left off."))
+            "leave empty to start a fresh scoring, or browse for a saved one",
+            "Continue an earlier scoring: its labels are shown, its scorer name "
+            "is kept (no prompt), and saving updates that same file.",
+            clear_cb=self._clear_prev))
         v.addWidget(c1)
 
         # ============ Card 2: recording & parameters ======================
@@ -539,7 +547,6 @@ class SetupGUI(QMainWindow):
             self.out_folder = folder
             self.out_edit.setText(folder)
             self._set_dot(self.out_dot, "ok")
-        self._autodetect_prev()
         self._update_ready()
 
     def _sel_emg(self):
@@ -561,7 +568,6 @@ class SetupGUI(QMainWindow):
             self.out_folder = folder
             self.out_edit.setText(folder)
             self._set_dot(self.out_dot, "ok")
-            self._autodetect_prev()
             self._update_ready()
 
     def _sel_prev(self):
@@ -575,26 +581,12 @@ class SetupGUI(QMainWindow):
         self.prev_edit.setToolTip(f)
         self._set_dot(self.prev_dot, "ok")
 
-    def _autodetect_prev(self):
-        """Look for an existing saved scoring and offer it, preferring the
-        auto-saved results/ files (newest first), then any *-states.npz/.mat
-        in the output / LFP folders."""
-        for folder in (self.out_folder, self.lfp_folder):
-            if not folder:
-                continue
-            # results_<date>_<name>.npz auto-saved on editor close; the sorted
-            # ISO date in the name makes the last one the most recent.
-            results = sorted(glob.glob(os.path.join(folder, "results",
-                                                    "results_*.npz")))
-            hits = (([results[-1]] if results else []) or
-                    sorted(glob.glob(os.path.join(folder, "*-states.npz"))) or
-                    sorted(glob.glob(os.path.join(folder, "*-states.mat"))))
-            if hits:
-                self.prev_file = hits[0]
-                self.prev_edit.setText(hits[0])
-                self.prev_edit.setToolTip(hits[0])
-                self._set_dot(self.prev_dot, "ok")
-                return
+    def _clear_prev(self):
+        """Empty the resume field — the next launch starts a fresh scoring."""
+        self.prev_file = ""
+        self.prev_edit.clear()
+        self.prev_edit.setToolTip("")
+        self._set_dot(self.prev_dot, "off")
 
     # ------------------------------------------------------------------ launch
     def _launch(self):
@@ -704,9 +696,10 @@ class SetupGUI(QMainWindow):
         self.hide()
         editor.show()
         self.show()
-        self._autodetect_prev()      # offer the just-saved results for resuming
-        self._set_status("State editor closed. Results saved to the 'results' "
-                         "subfolder of the LFP folder.", OK_GREEN)
+        saved = getattr(editor, "results_path", None)
+        msg = ("State editor closed." if not saved else
+               f"State editor closed. Scoring saved to {os.path.basename(saved)}.")
+        self._set_status(msg, OK_GREEN)
 
     def _buzsaki_labels(self, chs, eeg_fs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).

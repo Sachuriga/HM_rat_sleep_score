@@ -84,8 +84,11 @@ The setup GUI opens. Steps:
    Browse for any `.npy`.
 4. **Output / save folder** — where results and the spectrogram cache are
    written. Defaults to the LFP folder.
-5. **Resume from previous scoring** (optional) — auto-detects a saved
-   `*-states.npz` / `*-states.mat` so you can continue an earlier session.
+5. **Resume from previous scoring** (optional) — empty by default, which
+   starts a fresh scoring. Browse for a saved `*-states.npz` / `*-states.mat`
+   (or a `results/` file) to continue it: its labels are loaded, its scorer
+   name is kept — no "Labeled by" prompt — and saving updates that same file
+   instead of writing a new one. **Clear** empties the field again.
 6. **Parameters** — sampling rate, session name, motion type, and optional
    Buzsáki auto-scoring with adjustable thresholds.
 

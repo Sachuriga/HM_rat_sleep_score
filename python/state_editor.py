@@ -13,15 +13,18 @@ load (2 -> awake, 4 -> NREM).
 Every bin starts as NREM (3) by default, so scoring means re-labelling the
 non-NREM stretches rather than covering the whole recording.
 
-On launch the editor asks who is scoring ("Labeled by"); on close it saves the
-scoring automatically to a ``results/`` subfolder of the input folder as
-``results_<date>_<name>.npz`` / ``.mat``.
+On launch the editor asks who is scoring ("Labeled by") and, on close, saves
+the scoring automatically to a ``results/`` subfolder of the input folder as
+``results_<date>_<name>.npz`` / ``.mat``.  Resuming an earlier scoring (loading
+one at launch or with ``l``) skips that prompt — the file's own scorer name is
+adopted — and saving updates that same file instead of creating a new one.
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
 import os
+import re
 
 import numpy as np
 import matplotlib
@@ -138,6 +141,20 @@ HELP_LINES = [
 EVENT_COLOR = "magenta"
 
 
+def _labeled_by_of(data, path):
+    """Scorer name for a loaded scoring: the file's own ``labeled_by`` field,
+    else the name embedded in a ``results_<date>_<name>`` filename, else None
+    (only then does the editor have to ask)."""
+    if "labeled_by" in data:
+        v = np.asarray(data["labeled_by"]).ravel()
+        name = str(v[0] if v.size else data["labeled_by"]).strip()
+        if name and name != "unknown":
+            return name
+    m = re.match(r"results_\d{4}-\d{2}-\d{2}_(.+)$",
+                 os.path.splitext(os.path.basename(path))[0])
+    return m.group(1).replace("_", " ") if m else None
+
+
 def _fmt_hms(x, _pos=None):
     """Format a time in seconds as h:mm:ss (or mm:ss under an hour) for the main
     time axis, so long overnight recordings read in hours at a glance."""
@@ -181,6 +198,9 @@ class StateEditor:
         # Auto-save on close goes here (results/ inside the input folder).
         self.results_folder = results_folder or os.path.join(out_folder, "results")
         self.labeled_by = labeled_by       # scorer name, asked on launch if unset
+        # File this scoring saves back into, set when an earlier scoring is
+        # loaded; None = save a fresh ``results_<date>_<name>`` file instead.
+        self.results_path = None
         self.n_ch = len(specs)
         self.chs = list(chs) if chs is not None else list(range(1, self.n_ch + 1))
         # Anatomical panel names (cortex / EEG / pyr) resolved from
@@ -933,7 +953,9 @@ class StateEditor:
         elif self.event_mode == "delete":
             extra = f" - Delete Event {self.event_num} (click near a mark)"
         star = "*" if getattr(self, "dirty", False) else ""
-        self._set_window_title(f"States: {self.base_name}{star}{extra}")
+        src = (f" — {os.path.basename(self.results_path)}"
+               if getattr(self, "results_path", None) else "")
+        self._set_window_title(f"States: {self.base_name}{star}{src}{extra}")
         self._sync_state_buttons()
         self._update_match()
         self._update_statusbar()
@@ -975,14 +997,18 @@ class StateEditor:
         self.match_lbl.setText(f"Auto ↔ Manual:  {agree:.0f}%   {ktxt}   (n={n})  ")
 
     def _update_statusbar(self):
-        """Reflect scored coverage and dirty state in the Qt status bar."""
+        """Reflect scored coverage, dirty state, scorer and save target in the
+        Qt status bar."""
         if getattr(self, "win", None) is None:
             return
         scored, total = self._coverage()
         pct = 100.0 * scored / total if total else 0.0
         flag = "● unsaved changes" if self.dirty else "✓ saved"
+        who = f"   ·   labeled by {self.labeled_by}" if self.labeled_by else ""
+        where = (f"   ·   → {os.path.basename(self.results_path)}"
+                 if self.results_path else "")
         self.win.statusBar().showMessage(f"{flag}   ·   scored {pct:.1f}%   ·   "
-                                         f"{len(self.events)} event(s)")
+                                         f"{len(self.events)} event(s){who}{where}")
 
     def _xlim_get(self):
         return self.ax_spec[0].get_xlim()
@@ -1334,30 +1360,39 @@ class StateEditor:
         return path
 
     def save_results(self):
-        """Save the scoring to ``<results_folder>/results_<date>_<name>``.
+        """Save the scoring: back into the resumed file, else a new
+        ``<results_folder>/results_<date>_<name>``.
 
         Written automatically when the editor window closes: both a NumPy
-        ``.npz`` (resumable) and a MATLAB ``.mat``, stamped with the scoring
-        date and the "Labeled by" name given on launch."""
-        os.makedirs(self.results_folder, exist_ok=True)
-        name = "_".join((self.labeled_by or "unknown").split()) or "unknown"
-        stem = f"results_{_datetime.date.today().isoformat()}_{name}"
+        ``.npz`` (resumable) and a MATLAB ``.mat``. A session that resumed an
+        earlier scoring updates that file in place — no second copy per day —
+        while a fresh session is stamped with today's date and the "Labeled by"
+        name given on launch."""
+        if self.results_path:                  # resumed: update that file
+            stem_path = os.path.splitext(self.results_path)[0]
+        else:
+            name = "_".join((self.labeled_by or "unknown").split()) or "unknown"
+            stem_path = os.path.join(
+                self.results_folder,
+                f"results_{_datetime.date.today().isoformat()}_{name}")
+        os.makedirs(os.path.dirname(stem_path) or ".", exist_ok=True)
         events = (np.array(self.events, dtype=float) if self.events
                   else np.zeros((0, 2)))
         transitions = self._compute_transitions()
-        npz_path = os.path.join(self.results_folder, stem + ".npz")
+        npz_path = stem_path + ".npz"
         np.savez(npz_path,
                  states=self.states.astype(int),
                  timestamps=self.to.astype(float),
                  events=events,
                  transitions=transitions,
                  labeled_by=np.array(self.labeled_by or "unknown"))
-        mat_path = os.path.join(self.results_folder, stem + ".mat")
+        mat_path = stem_path + ".mat"
         savemat(mat_path, {"states": self.states.astype(float).reshape(1, -1),
                            "events": events,
                            "transitions": transitions,
                            "labeled_by": self.labeled_by or "unknown"})
         print(f"Saved results to {npz_path} (+ .mat)")
+        self.results_path = npz_path       # further saves update the same file
         self.dirty = False
         self._set_title()
         return npz_path
@@ -1379,7 +1414,11 @@ class StateEditor:
     def load_states(self, path=None):
         """Load a previously saved scoring, from either a NumPy ``.npz`` or a
         MATLAB ``-states.mat`` (chosen by extension). Only applied when the bin
-        count matches this session."""
+        count matches this session.
+
+        The loaded file becomes this session's save target: its scorer name is
+        adopted (so the "Labeled by" prompt is skipped) and saving updates that
+        file rather than writing a new one."""
         if path is None:
             path = os.path.join(self.out_folder, f"{self.base_name}-states.mat")
         if not os.path.isfile(path):
@@ -1391,9 +1430,14 @@ class StateEditor:
             if s.size == self.n_bins:
                 self.states = s
                 self.dirty = False
+                self.results_path = path           # save back into this file
+                who = _labeled_by_of(data, path)
+                if who:
+                    self.labeled_by = who
                 self._refresh_state_bar()
                 self._set_title()
-                print(f"Loaded states from {path}")
+                print(f"Loaded states from {path}"
+                      + (f" (labeled by {self.labeled_by})" if self.labeled_by else ""))
             else:
                 print(f"State length mismatch ({s.size} vs {self.n_bins}); ignored")
         if "events" in data:
@@ -1422,7 +1466,8 @@ class StateEditor:
         """Show the editor window and block until it is closed.
 
         Asks for the scorer's name ("Labeled by") first — cancelling that
-        prompt aborts opening the editor. Uses a nested Qt event loop so a
+        prompt aborts opening the editor. A resumed scoring already carries its
+        scorer's name, so the prompt is skipped. Uses a nested Qt event loop so a
         caller (the setup GUI) can invoke this synchronously from within the
         already-running application loop, the same way ``QDialog.exec()``
         blocks. No-op when built headlessly."""

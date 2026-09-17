@@ -69,7 +69,11 @@ ed.states[:] = 0
 ed.load_states(path)
 assert (ed.states[10:26] == 3).all(), "load round-trip failed"
 
-# Auto-saved results file (what closing the editor window writes)
+# Auto-saved results file (what closing the editor window writes) for a FRESH
+# session — a dated results_ file. (The load above made this a resumed session,
+# whose save target is the loaded file; the resume case is tested below.)
+assert ed.results_path == path, "loading a scoring should adopt it as save target"
+ed.results_path = None
 ed.labeled_by = "Test User"
 rpath = ed.save_results()
 assert os.path.isfile(rpath) and os.path.basename(os.path.dirname(rpath)) == "results"
@@ -93,5 +97,34 @@ assert st.tolist() == [bz.NREM, bz.NREM, bz.REM, bz.WAKE, bz.WAKE, bz.NREM]
 from state_editor import sanitize_states
 assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 3, 5]
 print("Buzsáki 3-state clustering + legacy-code mapping ok")
+
+# Resuming a scored file: the scorer name comes from the file (no prompt) and
+# saving updates that same file instead of writing a new one.
+import glob, tempfile
+rdir = tempfile.mkdtemp()
+ed.results_folder = rdir
+ed.results_path = None                     # a fresh session
+ed.labeled_by = "Test User"
+first = ed.save_results()
+assert len(glob.glob(os.path.join(rdir, "*.npz"))) == 1
+
+ed2 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed2.results_folder = rdir
+assert ed2.labeled_by is None              # would prompt on launch...
+ed2.load_states(first)
+assert ed2.labeled_by == "Test User", ed2.labeled_by   # ...but the file names the scorer
+assert ed2.results_path == first
+assert (ed2.states[40:56] == 5).all(), "resumed labels not shown"
+ed2._apply_state(80, 95, 1)                # edit, then auto-save as on close
+again = ed2.save_results()
+assert again == first, f"made a new file: {again} != {first}"
+assert len(glob.glob(os.path.join(rdir, "*.npz"))) == 1, "a second results file appeared"
+assert (np.load(first)["states"][80:96] == 1).all(), "edit not written back"
+
+# a file with no labeled_by field falls back to the name in its filename
+from state_editor import _labeled_by_of
+assert _labeled_by_of({}, "results_2026-09-17_Sachuriga_R.npz") == "Sachuriga R"
+assert _labeled_by_of({}, "session-states.npz") is None
+print("resume round-trip ok: same scorer, same file")
 
 print("\nALL CHECKS PASSED")
