@@ -221,7 +221,7 @@ multipliers no longer apply; delete the file to go back. Repeat
 `--lfp_folder`/`--labels` to fit several sessions at once, which is the better
 way to use it — one session teaches it that session's electrodes.
 
-Seven features per 1 s bin, each smoothed 15 s then z-scored within the session
+Eight features per 1 s bin, each smoothed 15 s then z-scored within the session
 (so electrode gain cancels), **all from the LFP** — no motion, no EMG file:
 
 | Feature | What | Separates |
@@ -229,6 +229,7 @@ Seven features per 1 s bin, each smoothed 15 s then z-scored within the session
 | `sw` | z(log δ 0.5–4) − z(log γ 40–100), cortex | NREM |
 | `thdelta` | log θ 5–10 − log δ 0.5–4, cortex | REM (AUC 0.99 vs NREM, against 0.89 for the 5–10/2–16 ratio) |
 | `hf` | log 275–500 Hz, cortex | WAKE (AUC 0.96, vs 0.96 for recorded EMG and 0.89 for the accelerometer) |
+| `ripple` | log 100–200 Hz − log 1–100 Hz, stratum radiatum | WAKE and **arousals** — the widest wake-to-sleep contrast of any band measured (1.3 log units on SR, 0.8 on cortex) |
 | `spindle` | log 10–16 Hz − log 1–100 Hz, stratum radiatum | **intermediate** (AUC 0.97 vs everything else) |
 | `spindle_hi` | log 13–18 Hz, stratum radiatum | intermediate vs REM (AUC 0.88) |
 | `sr_thdelta` | log θ 5–10 − log δ 0.5–4, stratum radiatum | REM |
@@ -240,8 +241,8 @@ Held-out agreement on our hand-scored session, 4 states against 3:
 
 | | accuracy | κ | WAKE | NREM | INTER | REM |
 |---|---|---|---|---|---|---|
-| 4 states | 0.906 | 0.817 | 0.90 / 0.86 | 0.92 / 0.94 | **0.71 / 0.56** | 0.85 / 0.90 |
-| 3 states | 0.912 | 0.825 | 0.90 / 0.86 | 0.92 / 0.94 | — | 0.96 / 0.92 |
+| 4 states | 0.908 | 0.821 | 0.90 / 0.87 | 0.92 / 0.94 | **0.70 / 0.55** | 0.87 / 0.90 |
+| 3 states | 0.915 | 0.831 | 0.90 / 0.87 | 0.92 / 0.94 | — | 0.97 / 0.93 |
 
 *(recall / precision per state)*. For reference, two passes of hand scoring over
 that same session differ on 3.7% of bins, so much of what is left is boundary
@@ -262,6 +263,32 @@ onset and stays there for the whole REM epoch: its epochs are capped at
 `INTER_MAX_S` (30 s — the hand-scored ones run 10–46 s) and it carries a small
 penalty `INTER_BIAS`. Both are stored in the model file and adjustable
 (`--inter_max_s`, `--inter_bias`).
+
+### Arousals, and what follows REM
+
+A REM epoch ends in an arousal — in this scoring all six do, and REM never runs
+straight into NREM. Two things were needed before the auto-score agreed:
+
+- the **`ripple` feature** (100–200 Hz on the SR channel). It rises at every REM
+  offset, and adding it took the recall of those post-REM arousals from 0.53 to
+  0.64, REM recall from 0.85 to 0.87, and κ from 0.819 to 0.822.
+- **protecting that arousal** from min-duration smoothing
+  (`buzsaki_score.post_rem_arousal`). Those arousals can be seconds long, and
+  absorbing one back into the REM epoch leaves an impossible REM→NREM
+  transition in the hypnogram. Protecting them takes the share of REM epochs
+  correctly ending in WAKE from 45% to **96%** at no cost elsewhere; the fitter
+  now prints that count.
+
+Brief arousals in general are still the weakest part: WAKE epochs shorter than
+30 s (22 of the 45 here) keep only ~0.42 recall, against 0.85 for longer ones.
+Instantaneous high-frequency power was tried for these — Hilbert envelope of
+100–200 Hz and 275–500 Hz, then the per-second peak or the fraction of the
+second spent bursting. On its own the burst fraction ranks short arousals much
+better than the spectrogram average (AUC 0.91 vs 0.83 against NREM), but it did
+not improve the model: a fraction bounded at zero has a point mass there in
+every sleep state, which a shared-covariance Gaussian fits badly, and neither
+log-transforming it nor using it as a post-decode arousal override helped. The
+arousals being missed are not high-burst seconds; they are genuinely faint ones.
 
 ## Files
 

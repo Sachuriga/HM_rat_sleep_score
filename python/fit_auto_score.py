@@ -11,21 +11,35 @@ the scorer actually produced.
 
 Features are computed from the LFP alone — no accelerometer, no EMG file — so a
 model fitted on one session runs on any session, including ones with no motion
-recorded. Seven per-second features, each smoothed (15 s), then z-scored within
+recorded. Eight per-second features, each smoothed (15 s), then z-scored within
 the session so electrode gain cancels:
 
     sw          z(log delta 0.5-4) - z(log gamma 40-100)   cortex   NREM
     thdelta     log theta 5-10 - log delta 0.5-4           cortex   REM
     hf          log power 275-500 Hz                       cortex   WAKE / muscle
+    ripple      log 100-200 Hz minus log 1-100 Hz          SR       WAKE, arousals
     spindle     log 10-16 Hz minus log 1-100 Hz            SR       intermediate
     spindle_hi  log power 13-18 Hz                         SR       intermediate vs REM
     sr_thdelta  log theta 5-10 - log delta 0.5-4           SR       REM
     amp_cv      CV of the 1-30 Hz envelope within a second cortex   REM is steady
 
-``hf`` is muscle tone read off the LFP's own high-frequency tail (the
-EMG-from-LFP idea): on our data it separates WAKE from sleep as well as the
-recorded EMG (AUC 0.96) and better than the accelerometer (0.89), and it needs
-no extra file.
+``hf`` and ``ripple`` are muscle tone and arousal read off the LFP's own
+high-frequency content (the EMG-from-LFP idea): ``hf`` separates WAKE from sleep
+as well as the recorded EMG (AUC 0.96) and better than the accelerometer (0.89),
+and needs no extra file. ``ripple`` adds the 100-200 Hz band of the SR channel,
+whose wake-to-sleep contrast is the widest of any band we measured (1.3 log
+units, against 0.8 on cortex); it is what gets the arousal *after REM* right,
+taking that recall from 0.53 to 0.64 and the share of REM epochs ending in WAKE
+from 45% to 96% (with :func:`buzsaki_score.post_rem_arousal`).
+
+Instantaneous high-frequency power was tried too — Hilbert envelope of those
+bands, then per-second peak or burst fraction. The burst fraction ranks brief
+arousals distinctly better on its own (AUC 0.91 against NREM, vs 0.83 for the
+spectrogram average), but it does not improve the fitted model: a bounded
+fraction has a point mass at zero in every sleep state, which a Gaussian
+emission fits badly, and log-transforming it or applying it as a post-decode
+arousal override both came out neutral-to-worse. The arousals the model misses
+are not high-burst seconds — they are genuinely weak ones.
 
 The two spindle features are what find **intermediate sleep**. On the stratum
 radiatum channel, relative to broadband, intermediate sits ~8 dB above both
@@ -62,11 +76,13 @@ import buzsaki_score as bz
 WAKE, NREM, INTER, REM = 1, 3, 4, 5
 STATE_NAMES = {WAKE: "WAKE", NREM: "NREM", INTER: "INTER", REM: "REM"}
 
-FEATURES = ("sw", "thdelta", "hf", "spindle", "spindle_hi", "sr_thdelta", "amp_cv")
+FEATURES = ("sw", "thdelta", "hf", "ripple", "spindle", "spindle_hi",
+            "sr_thdelta", "amp_cv")
 SMOOTH_S = 15.0
 SPINDLE_BAND = (10.0, 16.0)      # sleep spindles: the intermediate-state marker
 SPINDLE_HI_BAND = (13.0, 18.0)   # upper spindle slice — separates INTER from REM
 BROADBAND = (1.0, 100.0)         # reference band for the gain-free spindle ratio
+RIPPLE_BAND = (100.0, 200.0)     # high-frequency band that rises on arousal
 AMP_BAND = (1.0, 30.0)           # band whose envelope steadiness marks REM
 AMP_BLOCK_BINS = 1800            # envelope computed in 30 min blocks (flat memory)
 DEFAULT_MODEL = "sleep_score_model.npz"
@@ -145,8 +161,10 @@ def extract_features(lfp, fs, sr_lfp=None):
 
     t_sr, sr = (channel(sr_lfp) if sr_lfp is not None else (t, ctx))
     sr_delta = sr(*bz.DELTA_BAND)
+    sr_broad = sr(*BROADBAND)
     sr_feats = {
-        "spindle": sr(*SPINDLE_BAND) - sr(*BROADBAND),
+        "ripple": sr(*RIPPLE_BAND) - sr_broad,
+        "spindle": sr(*SPINDLE_BAND) - sr_broad,
         "spindle_hi": sr(*SPINDLE_HI_BAND),
         "sr_thdelta": sr(*bz.TH_BAND) - sr_delta,
     }
@@ -379,6 +397,19 @@ def state_runs(states, code):
             if states[a] == code]
 
 
+def rem_exits(states):
+    """``(n_ending_in_wake, n_rem_epochs)`` — REM should terminate in an arousal.
+
+    A REM epoch running straight into NREM is not a thing the animal does, so
+    this is a quick check that a hypnogram is physiologically shaped, not just
+    accurate bin by bin.
+    """
+    states = np.asarray(states, int)
+    runs = state_runs(states, REM)
+    to_wake = sum(1 for a, b in runs if b < states.size and states[b] == WAKE)
+    return to_wake, len(runs)
+
+
 def epoch_detection(pred, truth, code=INTER):
     """Epoch-level score for a rare state: ``(found, total, extra, predicted)``.
 
@@ -430,6 +461,11 @@ def print_report(pred, y, codes, title, min_secs=10.0):
         found, total, extra, n_auto = epoch_detection(pred, y, INTER)
         print(f"  intermediate epochs: found {found} of your {total}, "
               f"{extra} extra ({n_auto} proposed)")
+    if REM in codes:
+        auto_w, auto_n = rem_exits(pred)
+        man_w, man_n = rem_exits(y)
+        print(f"  REM epochs ending in WAKE: {auto_w} of {auto_n} "
+              f"(yours {man_w} of {man_n})")
     return pred
 
 
