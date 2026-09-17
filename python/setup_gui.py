@@ -876,29 +876,53 @@ class SetupGUI(QMainWindow):
         low in NREM — cleanly complementing the EMG/motion traces.)
         """
         overlays = []
-        # EMG-from-LFP (5 Hz, has its own timestamps)
-        ef = find_output(self.lfp_folder, "emg_from_lfp_5hz.npy") or \
-            find_output(self.lfp_folder, "emg_from_lfp.npy")
-        if ef is not None:
+        emg = ets = td = None
+
+        # Prefer the session NWB — it is the only source for a folder that holds
+        # nothing but the .nwb.
+        if self.nwb_path:
+            import sleep_nwb as snwb
+            inputs = None
             try:
-                emg = np.load(ef).ravel()
-                tsf = find_output(self.lfp_folder, "emg_from_lfp_timestamps.npy")
-                ets = np.load(tsf).ravel() if tsf is not None else None
-                overlays.append(("EMG", emg, ets))
+                inputs = snwb.read_sleep_inputs(self.nwb_path)
+                if inputs.get("emg") is not None:
+                    emg = np.asarray(inputs["emg"]).ravel()
+                    ets = inputs.get("emg_timestamps")
+                series = inputs.get("derived", {}).get("theta_delta_ratio")
+                if series is not None:
+                    td = np.asarray(series[::100], dtype=float)
             except Exception as exc:
-                print(f"Warning: could not load EMG overlay: {exc}")
-        # theta/delta ratio (full LFP rate) — log-scaled (heavily skewed),
-        # decimated, and smoothed (~15 s) so the NREM/REM trend is legible.
-        tf = find_output(self.lfp_folder, "theta_delta_ratio.npy")
-        if tf is not None:
-            try:
-                td = np.asarray(np.load(tf, mmap_mode="r")[::100], dtype=float)
-                td = np.log10(np.clip(td, 1e-6, None))
-                from scipy.ndimage import uniform_filter1d
-                td = uniform_filter1d(td, size=225, mode="nearest")  # ~15 s @ 15 Hz
-                overlays.append(("theta/delta", td, None))
-            except Exception as exc:
-                print(f"Warning: could not load theta/delta overlay: {exc}")
+                print(f"Warning: could not read overlays from the NWB: {exc}")
+            finally:
+                snwb.close_inputs(inputs)
+
+        if emg is None:                      # legacy .npy (5 Hz, own timestamps)
+            ef = find_output(self.lfp_folder, "emg_from_lfp_5hz.npy") or \
+                find_output(self.lfp_folder, "emg_from_lfp.npy")
+            if ef is not None:
+                try:
+                    emg = np.load(ef).ravel()
+                    tsf = find_output(self.lfp_folder, "emg_from_lfp_timestamps.npy")
+                    ets = np.load(tsf).ravel() if tsf is not None else None
+                except Exception as exc:
+                    print(f"Warning: could not load EMG overlay: {exc}")
+        if emg is not None:
+            overlays.append(("EMG", emg, ets))
+
+        if td is None:
+            tf = find_output(self.lfp_folder, "theta_delta_ratio.npy")
+            if tf is not None:
+                try:
+                    td = np.asarray(np.load(tf, mmap_mode="r")[::100], dtype=float)
+                except Exception as exc:
+                    print(f"Warning: could not load theta/delta overlay: {exc}")
+        # log-scaled (heavily skewed), decimated above, and smoothed (~15 s) so
+        # the NREM/REM trend is legible.
+        if td is not None:
+            from scipy.ndimage import uniform_filter1d
+            td = np.log10(np.clip(td, 1e-6, None))
+            td = uniform_filter1d(td, size=225, mode="nearest")  # ~15 s @ 15 Hz
+            overlays.append(("theta/delta", td, None))
         return overlays
 
 

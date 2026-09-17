@@ -119,16 +119,45 @@ scoring automatically (you are only prompted if that write fails).
 
 ## One NWB per session
 
-The tracker's **step 8** packages everything this tool needs into the session
-NWB (`<op>/<Rat>_<YYYYMMDD>.nwb`) — `acquisition/lfp`, `acquisition/emg_from_lfp`,
-`acquisition/motion` and `processing/sleep/sleep_channels`. Steps **w**
-(behaviour/trials) and **u** (units) then *append* to that same file, so it is
-never rewritten and nothing stored in it is lost.
+The tracker's **step 8** writes the session NWB (`<op>/<Rat>_<YYYYMMDD>.nwb`)
+as its primary output — it is where the per-sample data lives:
 
-Point the setup GUI at a folder holding that `.nwb` and it reads the LFP
-straight out of it — one channel is sliced from HDF5 at a time, so a multi-hour
-session never loads into memory. The loose `.npy` files still work as a
-fallback when there is no NWB.
+| In the NWB | From |
+|---|---|
+| `acquisition/lfp` | the LFP export (one column per channel) |
+| `acquisition/emg_from_lfp` | the EMG-from-LFP export (5 Hz) |
+| `acquisition/motion` | the accelerometer export |
+| `processing/sleep/awakeness`, `emg_rms`, `theta_delta_ratio` | derived per-sample signals |
+| `processing/sleep/sleep_channels` | per-rat cortex / sr / pyr tetrodes |
+| `processing/sleep/session_info` | channel map, session boundaries, EMG channel, SNR |
+
+Steps **w** (behaviour/trials) and **u** (units) then *append* to that same
+file, so it is never rewritten and nothing stored in it is lost.
+
+**There is no `LFP_Output/` folder any more** — the session folder holds just
+the one `.nwb`. Everything that used to be a `.npy` there is in the NWB
+(`channels_npy/` even duplicated `lfp_data.npy` on top of the NWB copy). Pass
+`--keep-npy` to the step-8 exports, or set `HM_KEEP_NPY=1` before the runner, to
+write `LFP_Output/` with all the old files alongside the NWB.
+
+**Naming.** The file is `<Rat>_<YYYYMMDD>.nwb`, plus the session folder's phase
+postfix when it has one: `Rat1_HM_Neurons_20260212_105706_post/` yields
+`Rat1_20260212_post.nwb`, so same-day sessions never collide. Step 8 and step w
+both derive it through `sleep_nwb.session_nwb_name`, so they always land on one
+file.
+
+**Time axis.** `lfp_timestamps.npy` held `np.arange(n_samples) / fs`. The NWB
+stores that same axis as a `rate` with `starting_time=0`, which is identical
+point for point (`t[i] = i/fs`) and costs 8 bytes per sample less — so the LFP
+stays on the seconds clock that spikes and behaviour already share. Spike times
+are untouched. `session_info.session_boundaries` additionally records where each
+concatenated session starts, in samples and in seconds.
+
+Point the setup GUI at a folder holding that `.nwb` and everything is read from
+it — LFP channels are sliced straight out of HDF5, so a multi-hour session never
+loads into memory. Older sessions that only have the loose `.npy` still work
+unchanged, and `src/nwb/export_sleep_nwb.py` in the tracker backfills an NWB for
+them.
 
 Each scorer's result is written back into the same file as
 `processing/sleep/states_<scorer>` (a `TimeIntervals` table of contiguous

@@ -206,7 +206,8 @@ def output_prefix(folder):
 
     Looks at known step-8 outputs and returns their common prefix (``''`` if the
     files are unprefixed / absent), so new files (e.g. buzsaki_states.npz) can
-    match the session's existing naming.
+    match the session's existing naming. A session that has only the NWB (the
+    default now) takes the prefix from its ``session_id``.
     """
     for suffix in ("lfp_data.npy", "lfp_timestamps.npy", "channel_map.npy"):
         p = find_output(folder, suffix)
@@ -214,6 +215,19 @@ def output_prefix(folder):
             base = os.path.basename(p)
             if base.endswith(suffix) and len(base) > len(suffix):
                 return base[:-len(suffix)]
+
+    try:
+        import sleep_nwb as snwb
+        from pynwb import NWBHDF5IO
+        nwb = snwb.find_session_nwb(folder)
+        if nwb is not None:
+            with NWBHDF5IO(str(nwb), mode="r") as io:
+                sid = (io.read().session_id or "").strip()
+            if sid:
+                return sid if sid.endswith("_") else sid + "_"
+            return nwb.stem + "_"
+    except Exception as exc:
+        print(f"Warning: could not read the session prefix from the NWB: {exc}")
     return ""
 
 
@@ -267,6 +281,37 @@ def find_lfp_source(folder: str):
         return {"kind": "channels", "files": files,
                 "channels": sorted(files), "n_samples": first.shape[0]}
     return None
+
+
+def load_sleep_channels(folder) -> dict:
+    """Per-rat ``{cortex, sr, pyr}`` tetrode numbers for a session, else ``{}``.
+
+    Prefers the session NWB — a folder holding only a ``.nwb`` (the copy handed
+    to students, say) still resolves its layers — and falls back to the loose
+    ``sleep_channels.npy``.
+    """
+    try:
+        import sleep_nwb as snwb
+        nwb = snwb.find_session_nwb(folder)
+        if nwb is not None:
+            inputs = None
+            try:
+                inputs = snwb.read_sleep_inputs(nwb)
+                sc = inputs.get("sleep_channels")
+                if sc:
+                    return dict(sc)
+            finally:
+                snwb.close_inputs(inputs)
+    except Exception as exc:
+        print(f"Warning: could not read sleep channels from the NWB: {exc}")
+
+    f = find_output(folder, "sleep_channels.npy")
+    if f is None:
+        return {}
+    try:
+        return dict(np.load(f, allow_pickle=True).item())
+    except Exception:
+        return {}
 
 
 def _nwb_lfp_info(nwb_path):

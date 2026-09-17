@@ -377,8 +377,35 @@ def load_states(path):
 DEFAULT_OUT = "buzsaki_states.npz"
 
 
+def _nwb_signals(lfp_dir):
+    """``(emg, emg_ts, motion, motion_ts)`` from the session NWB, all None when
+    there is no NWB. Cached per folder — each call would otherwise reopen it."""
+    key = str(lfp_dir)
+    if key in _NWB_CACHE:
+        return _NWB_CACHE[key]
+    out = (None, None, None, None)
+    try:
+        import sleep_nwb as snwb
+        nwb = snwb.find_session_nwb(lfp_dir)
+        if nwb is not None:
+            inputs = snwb.read_sleep_inputs(nwb, lazy=False)
+            out = (inputs.get("emg"), inputs.get("emg_timestamps"),
+                   inputs.get("motion"), inputs.get("motion_timestamps"))
+    except Exception as exc:
+        print(f"  warning: could not read signals from the session NWB: {exc}")
+    _NWB_CACHE[key] = out
+    return out
+
+
+_NWB_CACHE = {}
+
+
 def _load_emg(lfp_dir, fs):
-    """Load the EMG-from-LFP signal from an LFP_Output folder, else (None, None)."""
+    """EMG-from-LFP for a session: from the NWB, else the legacy ``.npy``."""
+    emg, ts, _, _ = _nwb_signals(lfp_dir)
+    if emg is not None:
+        return np.asarray(emg).ravel(), (None if ts is None else np.asarray(ts).ravel())
+
     from processing import find_output
     f5 = find_output(lfp_dir, "emg_from_lfp_5hz.npy")   # prefixed or not
     if f5 is not None:
@@ -394,8 +421,21 @@ def _load_emg(lfp_dir, fs):
 
 
 def _load_motion(lfp_dir, fs):
-    """Load the accelerometer motion magnitude (decimated) + timestamps, else
-    (None, None). Used for the wake/sleep split in preference to EMG-from-LFP."""
+    """Accelerometer movement magnitude + timestamps, else (None, None).
+
+    Read from the session NWB when present, else the legacy ``.npy``. Drives
+    the wake/sleep split in preference to EMG-from-LFP. Decimated by 100 —
+    the trace is smooth at 1500 Hz and the scorer bins it to 1 s anyway.
+    """
+    _, _, motion, ts = _nwb_signals(lfp_dir)
+    if motion is not None:
+        m = np.asarray(motion, dtype=np.float64).ravel()[::100]
+        if ts is not None:
+            t = np.asarray(ts, dtype=np.float64).ravel()[::100]
+            n = min(m.size, t.size)
+            return m[:n], t[:n]
+        return m, np.arange(m.size) * (100.0 / fs)
+
     from processing import find_output
     f = find_output(lfp_dir, "motion_accel.npy")     # 1-D magnitude, prefixed or not
     if f is None:
@@ -460,9 +500,11 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     if src is None:
         raise FileNotFoundError(f"no lfp_data.npy or channels_npy/ in {lfp_dir}")
     if fs is None:
-        fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy"))
+        # an NWB source carries its own rate; else fall back to lfp_timestamps.npy
+        fs = src.get("fs") or detect_sampling_rate(
+            find_output(lfp_dir, "lfp_timestamps.npy"))
         if fs and fs > LFP_FS_MAX:
-            print(f"  warning: lfp_timestamps.npy implies {int(fs)} Hz (the raw "
+            print(f"  warning: the LFP timebase implies {int(fs)} Hz (the raw "
                   f"acquisition rate, not the LFP rate) — using 1500 Hz instead")
             fs = None
         fs = fs or 1500.0
@@ -470,9 +512,9 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     # Auto-load per-rat cortex/sr tetrodes saved by the tracker (SLEEP_CHANNELS_<rat>)
     # unless the caller passed them explicitly.
     if ctx_channel is None and sr_channel is None:
-        scf = find_output(lfp_dir, "sleep_channels.npy")
-        if scf is not None:
-            sc = np.load(scf, allow_pickle=True).item()
+        from processing import load_sleep_channels
+        sc = load_sleep_channels(lfp_dir)
+        if sc:
             ctx_channel = sc.get("cortex")
             sr_channel = sc.get("sr")
             print(f"  using SLEEP_CHANNELS: cortex={ctx_channel} sr={sr_channel} "

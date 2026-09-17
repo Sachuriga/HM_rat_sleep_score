@@ -190,17 +190,21 @@ def features_from_lfp_output(lfp_dir, fs=None, channel=None, sr_channel=None):
     from processing import (find_lfp_source, load_lfp_channel,
                             detect_sampling_rate, find_output, LFP_FS_MAX)
 
+    from processing import load_sleep_channels
+
     lfp_dir = Path(lfp_dir)
     src = find_lfp_source(str(lfp_dir))
     if src is None:
-        raise FileNotFoundError(f"no lfp_data.npy or channels_npy/ in {lfp_dir}")
+        raise FileNotFoundError(
+            f"no session .nwb, lfp_data.npy or channels_npy/ in {lfp_dir}")
     if fs is None:
-        fs = detect_sampling_rate(find_output(lfp_dir, "lfp_timestamps.npy"))
+        # an NWB source carries its own rate; else fall back to lfp_timestamps.npy
+        fs = src.get("fs") or detect_sampling_rate(
+            find_output(lfp_dir, "lfp_timestamps.npy"))
         fs = None if (fs and fs > LFP_FS_MAX) else fs
         fs = fs or 1500.0
     if channel is None or sr_channel is None:
-        scf = find_output(lfp_dir, "sleep_channels.npy")
-        sc = np.load(scf, allow_pickle=True).item() if scf is not None else {}
+        sc = load_sleep_channels(lfp_dir)
         channel = channel if channel is not None else sc.get("cortex")
         sr_channel = sr_channel if sr_channel is not None else sc.get("sr")
     if channel is None:

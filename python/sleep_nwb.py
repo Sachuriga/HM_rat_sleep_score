@@ -51,6 +51,9 @@ EMG_NAME = "emg_from_lfp"
 MOTION_NAME = "motion"
 SLEEP_MODULE = "sleep"
 SLEEP_CHANNELS_NAME = "sleep_channels"
+SESSION_INFO_NAME = "session_info"
+# per-sample signals derived from the LFP by the tracker's LFP export
+DERIVED_NAMES = ("awakeness", "emg_rms", "theta_delta_ratio")
 STATES_PREFIX = "states_"
 EVENTS_PREFIX = "events_"
 
@@ -67,14 +70,35 @@ def _slug(name: str) -> str:
 # ---------------------------------------------------------------------------- #
 #  Locating the session NWB
 # ---------------------------------------------------------------------------- #
-def session_nwb_name(prefix: str) -> str:
-    """``Rat6_20260629_143022_`` (a step-8 file prefix) -> ``Rat6_20260629.nwb``.
+def folder_postfix(folder) -> str:
+    """The phase token trailing a session folder's name, e.g. ``'post'``.
 
-    Matches the name ``create_nwb.py`` derives from the session's coordinate
-    CSV, so step 8 and step w land on the same file.
+    Session folders are ``<Rat>_<label>_<YYYYMMDD>_<HHMMSS>`` with an optional
+    phase suffix, so ``Rat1_HM_Neurons_20260212_105706_post`` gives ``'post'``
+    and ``Rat1_HM_Neurons_20260211_104846`` gives ``''``. Sessions recorded on
+    the same day are told apart by this token, which is why it belongs in the
+    NWB's name.
+    """
+    if not folder:
+        return ""
+    m = re.search(r"_\d{8}_\d{6}[_-]*(.*)$", Path(folder).name)
+    if not m:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]+", "_", m.group(1)).strip("_")
+
+
+def session_nwb_name(prefix: str, folder=None) -> str:
+    """The session NWB's filename: ``Rat6_20260629.nwb``, or
+    ``Rat6_20260212_post.nwb`` when the session folder carries a phase postfix.
+
+    ``prefix`` is a step-8 file prefix (``Rat6_20260629_143022_``) and
+    ``folder`` the session folder, whose postfix is appended. Both step 8 and
+    step w derive the name through here, so they always land on one file.
     """
     m = re.match(r"^([A-Za-z]+\d+)_(\d{8})", str(prefix or ""))
-    return f"{m.group(1)}_{m.group(2)}.nwb" if m else "session.nwb"
+    base = f"{m.group(1)}_{m.group(2)}" if m else "session"
+    post = folder_postfix(folder)
+    return f"{base}_{post}.nwb" if post else f"{base}.nwb"
 
 
 def find_session_nwb(folder):
@@ -120,9 +144,8 @@ def read_sleep_inputs(nwb_path, lazy=True):
     lfp = _acq(LFP_NAME)
     if lfp is not None:
         out["lfp"] = lfp.data if lazy else np.asarray(lfp.data)
-        ts = np.asarray(lfp.timestamps[:]) if lfp.timestamps is not None else None
-        out["lfp_timestamps"] = ts
-        out["fs"] = _rate_from(ts, getattr(lfp, "rate", None))
+        out["fs"] = _series_rate(lfp)
+        out["lfp_timestamps"] = _series_times(lfp, lfp.data.shape[0])
     else:
         out["lfp"] = out["lfp_timestamps"] = out["fs"] = None
 
@@ -131,15 +154,49 @@ def read_sleep_inputs(nwb_path, lazy=True):
         if series is None:
             out[key] = out[f"{key}_timestamps"] = None
             continue
-        out[key] = np.asarray(series.data[:]).ravel()
-        out[f"{key}_timestamps"] = (np.asarray(series.timestamps[:]).ravel()
-                                    if series.timestamps is not None else None)
+        values = np.asarray(series.data[:]).ravel()
+        out[key] = values
+        out[f"{key}_timestamps"] = _series_times(series, values.size)
 
-    out["sleep_channels"] = _read_sleep_channels(nwbfile)
+    mod = _sleep_module(nwbfile)
+    out["sleep_channels"] = _read_json(mod, SLEEP_CHANNELS_NAME)
+    out["session_info"] = _read_json(mod, SESSION_INFO_NAME)
+    out["derived"] = {}
+    if mod is not None:
+        for name in DERIVED_NAMES:
+            if name in mod.data_interfaces:
+                series = mod[name]
+                out["derived"][name] = (series.data if lazy
+                                        else np.asarray(series.data[:]).ravel())
     if not lazy:
         io.close()
         out["io"] = None
     return out
+
+
+def _series_rate(series):
+    """Sampling rate of a TimeSeries, whether it stores a rate or timestamps."""
+    if getattr(series, "rate", None):
+        return float(series.rate)
+    ts = getattr(series, "timestamps", None)
+    if ts is not None and len(ts) > 1:
+        head = np.asarray(ts[:1000])
+        dt = float(np.median(np.diff(head))) if head.size > 1 else 0.0
+        return 1.0 / dt if dt > 0 else None
+    return None
+
+
+def _series_times(series, n):
+    """The series' time axis, synthesised from its rate when it has no explicit
+    timestamps array (that is how uniformly-sampled signals are stored)."""
+    ts = getattr(series, "timestamps", None)
+    if ts is not None:
+        return np.asarray(ts[:]).ravel()
+    rate = getattr(series, "rate", None)
+    if not rate:
+        return None
+    t0 = float(getattr(series, "starting_time", 0.0) or 0.0)
+    return t0 + np.arange(int(n), dtype=np.float64) / float(rate)
 
 
 def close_inputs(inputs):
@@ -152,15 +209,6 @@ def close_inputs(inputs):
             pass
 
 
-def _rate_from(timestamps, rate=None):
-    """Sampling rate from per-sample timestamps (median step), else ``rate``."""
-    if timestamps is not None and np.size(timestamps) > 1:
-        dt = float(np.median(np.diff(np.asarray(timestamps[:200000]))))
-        if dt > 0:
-            return 1.0 / dt
-    return float(rate) if rate else None
-
-
 def _sleep_module(nwbfile, create=False):
     mod = nwbfile.processing.get(SLEEP_MODULE)
     if mod is None and create:
@@ -171,13 +219,12 @@ def _sleep_module(nwbfile, create=False):
     return mod
 
 
-def _read_sleep_channels(nwbfile):
-    """The cortex / sr / pyr tetrode numbers stored by step 8, or None."""
-    mod = _sleep_module(nwbfile)
-    if mod is None or SLEEP_CHANNELS_NAME not in mod.data_interfaces:
+def _read_json(mod, name):
+    """A JSON record carried in a placeholder series' description, or None."""
+    if mod is None or name not in mod.data_interfaces:
         return None
     try:
-        return json.loads(mod[SLEEP_CHANNELS_NAME].description)
+        return json.loads(mod[name].description)
     except Exception:
         return None
 
@@ -185,24 +232,29 @@ def _read_sleep_channels(nwbfile):
 # ---------------------------------------------------------------------------- #
 #  Writing the scoring inputs (tracker step 8)
 # ---------------------------------------------------------------------------- #
-def add_sleep_inputs(nwbfile, lfp=None, lfp_timestamps=None, emg=None,
-                     emg_timestamps=None, motion=None, motion_timestamps=None,
-                     sleep_channels=None, lfp_unit="uV"):
+def add_sleep_inputs(nwbfile, lfp=None, lfp_timestamps=None, lfp_rate=None,
+                     emg=None, emg_timestamps=None, emg_rate=None,
+                     motion=None, motion_timestamps=None, motion_rate=None,
+                     sleep_channels=None, derived=None, metadata=None,
+                     lfp_unit="uV"):
     """Add the scorer's inputs to ``nwbfile``. Existing containers are left
     alone, so this is safe to re-run against a session that step w already
-    populated. Returns the list of names actually added."""
+    populated. Returns the list of names actually added.
+
+    A signal on a uniform clock should be given a ``*_rate`` rather than an
+    explicit timestamps array: NWB then stores only the rate, which spares the
+    file an 8-byte-per-sample time axis (hundreds of MB over a long session).
+
+    ``derived`` holds per-sample signals computed from the LFP
+    (``awakeness``, ``emg_rms``, ``theta_delta_ratio``), each on the LFP clock.
+    ``metadata`` holds the small session records (channel map, session
+    boundaries, cleanest channels, SNR scores) as JSON.
+    """
     from pynwb import TimeSeries
 
     added = []
 
-    def _add_acq(name, data, ts, unit, description):
-        if data is None:
-            return
-        try:
-            nwbfile.get_acquisition(name)
-            return                      # already there — never clobber
-        except Exception:
-            pass
+    def _series(name, data, ts, rate, unit, description):
         ts = None if ts is None else np.asarray(ts).ravel()
         # A chunk iterator / H5DataIO streams straight to HDF5 (a multi-GB LFP
         # never lands in RAM); only a plain array can be length-reconciled here.
@@ -211,37 +263,73 @@ def add_sleep_inputs(nwbfile, lfp=None, lfp_timestamps=None, emg=None,
             if ts is not None and data.shape[0] != ts.shape[0]:
                 n = min(data.shape[0], ts.shape[0])
                 data, ts = data[:n], ts[:n]
-        kw = {"timestamps": ts} if ts is not None else {"rate": 1.0}
-        nwbfile.add_acquisition(TimeSeries(name=name, data=data, unit=unit,
-                                           description=description, **kw))
+        if ts is not None:
+            kw = {"timestamps": ts}
+        else:
+            kw = {"rate": float(rate or 1.0), "starting_time": 0.0}
+        return TimeSeries(name=name, data=data, unit=unit,
+                          description=description, **kw)
+
+    def _add_acq(name, data, ts, rate, unit, description):
+        if data is None:
+            return
+        try:
+            nwbfile.get_acquisition(name)
+            return                      # already there — never clobber
+        except Exception:
+            pass
+        nwbfile.add_acquisition(_series(name, data, ts, rate, unit, description))
         added.append(name)
 
-    _add_acq(LFP_NAME, lfp, lfp_timestamps, lfp_unit,
-             "LFP voltage, one column per channel.")
-    _add_acq(EMG_NAME, emg, emg_timestamps, "normalized",
+    _add_acq(LFP_NAME, lfp, lfp_timestamps, lfp_rate, lfp_unit,
+             "LFP voltage, one column per channel (see sleep/session_info "
+             "for the channel map).")
+    _add_acq(EMG_NAME, emg, emg_timestamps, emg_rate, "normalized",
              "EMG-from-LFP (Buzsaki cross-channel correlation), 0-1 normalised.")
-    _add_acq(MOTION_NAME, motion, motion_timestamps, "g",
+    _add_acq(MOTION_NAME, motion, motion_timestamps, motion_rate, "g",
              "Accelerometer (IMU) movement magnitude.")
 
-    if sleep_channels:
+    if sleep_channels or derived or metadata:
         mod = _sleep_module(nwbfile, create=True)
-        if SLEEP_CHANNELS_NAME not in mod.data_interfaces:
-            mod.add(TimeSeries(
-                name=SLEEP_CHANNELS_NAME, data=[0], unit="n/a", rate=1.0,
-                description=json.dumps({k: _jsonable(v)
-                                        for k, v in dict(sleep_channels).items()})))
-            added.append(SLEEP_CHANNELS_NAME)
+
+    if sleep_channels and SLEEP_CHANNELS_NAME not in mod.data_interfaces:
+        mod.add(TimeSeries(
+            name=SLEEP_CHANNELS_NAME, data=[0], unit="n/a", rate=1.0,
+            description=json.dumps(_jsonable(dict(sleep_channels)))))
+        added.append(SLEEP_CHANNELS_NAME)
+
+    for name, spec in (derived or {}).items():
+        if spec is None or name in mod.data_interfaces:
+            continue
+        data, rate, unit, desc = (spec if isinstance(spec, tuple)
+                                  else (spec, lfp_rate, "a.u.", f"{name} (per LFP sample)."))
+        if data is None:
+            continue
+        mod.add(_series(name, data, None, rate, unit, desc))
+        added.append(name)
+
+    if metadata and SESSION_INFO_NAME not in mod.data_interfaces:
+        mod.add(TimeSeries(name=SESSION_INFO_NAME, data=[0], unit="n/a", rate=1.0,
+                           description=json.dumps(_jsonable(dict(metadata)))))
+        added.append(SESSION_INFO_NAME)
     return added
 
 
 def _jsonable(v):
-    if isinstance(v, (np.integer,)):
+    """Make numpy scalars / arrays / nested containers JSON-serialisable."""
+    if isinstance(v, np.integer):
         return int(v)
-    if isinstance(v, (np.floating,)):
+    if isinstance(v, np.floating):
         return float(v)
     if isinstance(v, np.ndarray):
-        return v.tolist()
-    return v
+        return [_jsonable(x) for x in v.tolist()]
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    return str(v)
 
 
 # ---------------------------------------------------------------------------- #
