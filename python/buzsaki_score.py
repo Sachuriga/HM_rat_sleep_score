@@ -23,6 +23,18 @@ Only these three states are produced; the paper's microarousals and any
 transitional/intermediate substates are folded into WAKE.
 
 States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
+
+Two scorers live here. This threshold scorer needs no training and runs on any
+session. When a model fitted to hand-scored sessions is present (see
+``fit_auto_score.py``), ``score_from_lfp_output`` uses that instead — on our
+hand-scored session it agrees with the scorer 91% of the time (kappa 0.81)
+against 87% for these thresholds and 80% for the pre-tuning defaults.
+
+The movement gate on REM prefers the EMG-from-LFP file, falling back to the
+LFP's own high-frequency power (``HF_BAND``) so sessions with neither an
+accelerometer nor an EMG file still get a gate. Accelerometer motion is used
+only when ``use_motion=True``: not every session records it, and thresholds
+that depend on it don't transfer to the ones that don't.
 """
 
 from __future__ import annotations
@@ -41,10 +53,19 @@ DELTA_BAND = (0.5, 4.0)      # slow-wave (delta) power band (Hz)
 GAMMA_BAND = (40.0, 100.0)   # gamma band, weighted opposite to delta (Hz)
 TH_BAND = (5.0, 10.0)        # theta band (Hz)
 TH_DENOM = (2.0, 16.0)       # theta-ratio denominator band (Hz)
+HF_BAND = (275.0, 500.0)     # muscle tone from the LFP's high-frequency tail (Hz)
 WINDOW_S = 2.0              # spectrogram window (s)
 DT_S = 1.0                 # spectrogram step / bin size (s)
 SMOOTH_S = 15.0            # metric smoothing window (s)
 TH_THRESH_FACTOR = 0.85    # lower the theta threshold (<1) to accept more REM
+# The slow-wave histogram dip sits below the REM mode on our recordings, so the
+# automatic cutoff labels most REM as NREM; x1.25 is where held-out agreement
+# with the hand scoring peaks (every cross-validation fold picked 1.20-1.25).
+SW_THRESH_FACTOR = 1.25
+# REM needs the movement signal below this percentile of its own distribution.
+# A percentile, not the bimodal dip: the dip lands at very different places on
+# the EMG-from-LFP and high-frequency traces, this cutoff fits both.
+MOVE_GATE_PCT = 60.0
 
 
 # ---------------------------------------------------------------------------- #
@@ -80,53 +101,58 @@ def _zscore(x):
     return x
 
 
-def _sw_metric(lfp, fs):
-    """broadbandSlowWave (0–1 per 1 s bin) = delta-vs-gamma spectrogram contrast.
+def _channel_metrics(lfp, fs):
+    """All per-bin metrics of one channel from a single spectrogram.
 
-    Implements the axis the paper's spectrogram PC1 captures — power at low
-    frequencies weighted opposite in sign to the gamma range (Watson et al.
-    2016, Fig. 1) — as z-scored log delta power minus z-scored log gamma power.
-    Computing the contrast directly instead of a per-session PCA keeps the
-    metric's sign and meaning fixed even when movement/broadband artifacts
-    dominate the spectrogram's variance (a broadband power rise lifts both
-    terms and cancels). High in NREM; low in theta-dominated REM and in
-    desynchronised, gamma-rich WAKE.
-    Cleanest from a CORTEX channel. Returns (times, sw, fs_bins)."""
+    Returns ``(times, {"sw", "thratio", "hf"})``, each 0–1 per 1 s bin:
+
+    * ``sw`` — broadbandSlowWave, the delta-vs-gamma spectrogram contrast.
+      Implements the axis the paper's spectrogram PC1 captures — power at low
+      frequencies weighted opposite in sign to the gamma range (Watson et al.
+      2016, Fig. 1) — as z-scored log delta power minus z-scored log gamma
+      power. Computing the contrast directly instead of a per-session PCA keeps
+      the metric's sign and meaning fixed even when movement/broadband
+      artifacts dominate the spectrogram's variance (a broadband power rise
+      lifts both terms and cancels). High in NREM; low in theta-dominated REM
+      and in desynchronised, gamma-rich WAKE. Cleanest from a CORTEX channel.
+    * ``thratio`` — narrow-band theta power ratio, power(5–10 Hz) /
+      power(2–16 Hz) (Watson et al. 2016). Strongest from a STRATUM RADIATUM
+      channel (theta peaks there in REM).
+    * ``hf`` — log power in ``HF_BAND``, muscle tone read off the LFP's own
+      high-frequency tail. Separates WAKE from sleep as well as a recorded EMG
+      does, and needs no extra file.
+    """
     f, t, Sxx = _spectrogram(lfp, fs)
     fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
     logP = np.log10(Sxx + 1e-12)
-    delta = logP[(f >= DELTA_BAND[0]) & (f <= DELTA_BAND[1]), :].mean(axis=0)
-    gamma = logP[(f >= GAMMA_BAND[0]) & (f <= GAMMA_BAND[1]), :].mean(axis=0)
-    sw = _zscore(delta) - _zscore(gamma)
-    return t, _norm01(_smooth(sw, fs_bins)), fs_bins
 
+    def band(lo, hi):
+        return logP[(f >= lo) & (f <= hi), :].mean(axis=0)
 
-def _theta_metric(lfp, fs):
-    """thratio (0–1 per 1 s bin) = narrow-band theta power ratio,
-    power(5–10 Hz) / power(2–16 Hz) (Watson et al. 2016).
-    Strongest from a STRATUM RADIATUM channel (theta peaks there in REM)."""
-    f, t, Sxx = _spectrogram(lfp, fs)
-    fs_bins = 1.0 / (np.median(np.diff(t)) if t.size > 1 else DT_S)
+    sw = _zscore(band(*DELTA_BAND)) - _zscore(band(*GAMMA_BAND))
     num = (f >= TH_BAND[0]) & (f <= TH_BAND[1])
     den = (f >= TH_DENOM[0]) & (f <= TH_DENOM[1])
     thratio = Sxx[num, :].sum(axis=0) / (Sxx[den, :].sum(axis=0) + 1e-24)
-    return t, _norm01(_smooth(thratio, fs_bins))
+    hf_hi = min(HF_BAND[1], 0.95 * fs / 2)          # stay under Nyquist
+    hf = band(min(HF_BAND[0], 0.6 * hf_hi), hf_hi)
+    return t, {k: _norm01(_smooth(v, fs_bins))
+               for k, v in (("sw", sw), ("thratio", thratio), ("hf", hf))}
 
 
 def compute_metrics(lfp, fs, emg=None, emg_ts=None, theta_lfp=None):
-    """Compute (times, broadbandSlowWave, thratio, emg_aligned), all 0–1 per 1 s bin.
+    """Compute (times, broadbandSlowWave, thratio, emg_aligned, hf), 0–1 per 1 s bin.
 
-    ``lfp`` provides the slow-wave metric — use a **cortex** channel. ``theta_lfp``
-    (optional) provides the theta metric — use a **stratum radiatum** channel where
-    theta peaks; if omitted, theta is taken from ``lfp`` too (single-channel mode).
-    ``emg`` + ``emg_ts`` is the EMG-from-LFP; if not given, REM/WAKE fall back to
-    theta only.
+    ``lfp`` provides the slow-wave and high-frequency metrics — use a **cortex**
+    channel. ``theta_lfp`` (optional) provides the theta metric — use a
+    **stratum radiatum** channel where theta peaks; if omitted, theta is taken
+    from ``lfp`` too (single-channel mode). ``emg`` + ``emg_ts`` is the
+    EMG-from-LFP; when it is missing, ``hf`` stands in as the movement signal.
     """
-    t, sw, _ = _sw_metric(lfp, fs)
-    if theta_lfp is None:
-        thratio = _theta_metric(lfp, fs)[1]
-    else:
-        t_th, thratio = _theta_metric(theta_lfp, fs)
+    t, m = _channel_metrics(lfp, fs)
+    sw, thratio, hf = m["sw"], m["thratio"], m["hf"]
+    if theta_lfp is not None:
+        t_th, m_th = _channel_metrics(theta_lfp, fs)
+        thratio = m_th["thratio"]
         # align theta bins onto the SW time base if the two differ in length
         if thratio.size != t.size:
             thratio = np.interp(t, t_th, thratio)
@@ -138,7 +164,7 @@ def compute_metrics(lfp, fs, emg=None, emg_ts=None, theta_lfp=None):
             emg_ts = np.linspace(t[0], t[-1], emg.size)
         emg_aligned = _norm01(np.interp(t, np.asarray(emg_ts).ravel(), emg))
 
-    return t, sw, thratio, emg_aligned
+    return t, sw, thratio, emg_aligned, hf
 
 
 # ---------------------------------------------------------------------------- #
@@ -183,8 +209,8 @@ def bimodal_threshold(x, nbins=60, default=0.5, mode="dip"):
 
 
 def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
-                   emgthresh=None, sw_factor=1.0, th_factor=TH_THRESH_FACTOR,
-                   emg_factor=1.0):
+                   emgthresh=None, sw_factor=SW_THRESH_FACTOR,
+                   th_factor=TH_THRESH_FACTOR, emg_factor=1.0):
     """Classify each 1 s bin into WAKE/NREM/REM (Watson et al. 2016 order).
 
     The slow-wave metric's bimodal split labels NREM first; among the remaining
@@ -196,8 +222,10 @@ def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
     Without any movement signal, theta alone gates REM (over-calls REM — supply
     EMG or motion for a proper split).
 
-    Each auto (bimodal) threshold is scaled by its ``*_factor`` (1.0 = auto;
-    th_factor <1 = more REM; emg_factor >1 = laxer movement gate on REM).
+    The slow-wave and theta cutoffs are the bimodal dips scaled by ``sw_factor``
+    / ``th_factor``; the movement ceiling is ``MOVE_GATE_PCT`` of the movement
+    signal's own distribution, scaled by ``emg_factor`` (th_factor <1 = more
+    REM; emg_factor >1 = laxer movement gate on REM).
     Returns ``(states, thresholds)``.
     """
     n = len(sw)
@@ -214,8 +242,8 @@ def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
     quiet = np.ones(n, dtype=bool)
     movt = None
     if movesigs:
-        thrs = [bimodal_threshold(s) * emg_factor if emgthresh is None else emgthresh
-                for s in movesigs]
+        thrs = [float(np.nanpercentile(s, MOVE_GATE_PCT)) * emg_factor
+                if emgthresh is None else emgthresh for s in movesigs]
         for s, thv in zip(movesigs, thrs):
             quiet &= s < thv                  # REM needs EVERY signal quiescent
         movt = thrs[0]
@@ -229,34 +257,29 @@ def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
 # ---------------------------------------------------------------------------- #
 #  Minimum-duration smoothing
 # ---------------------------------------------------------------------------- #
-def _runs(states):
-    """Yield (start, end_exclusive, value) for each contiguous run."""
-    if len(states) == 0:
-        return
-    start = 0
-    for i in range(1, len(states) + 1):
-        if i == len(states) or states[i] != states[start]:
-            yield start, i, states[start]
-            start = i
-
-
 def enforce_min_duration(states, min_secs=6, dt=1.0):
-    """Remove state runs shorter than ``min_secs`` by merging into the previous run.
+    """Remove state runs shorter than ``min_secs`` by merging into a neighbour.
 
-    A light-weight stand-in for the Buzsáki min-window rules: short blips are
-    absorbed into their preceding state, iterated until stable.
+    A light-weight stand-in for the Buzsáki min-window rules: the shortest blip
+    is absorbed into whichever neighbouring epoch is longer (ties to the
+    earlier one, as the state editor does), repeated until every run is long
+    enough.
     """
     states = np.asarray(states, dtype=int).copy()
     min_bins = max(1, int(round(min_secs / dt)))
-    changed = True
-    while changed:
-        changed = False
-        for s, e, v in list(_runs(states)):
-            if v != 0 and (e - s) < min_bins:
-                fill = states[s - 1] if s > 0 else (states[e] if e < len(states) else v)
-                states[s:e] = fill
-                changed = True
-                break
+    while states.size > 1:
+        edges = np.flatnonzero(np.diff(states)) + 1
+        starts = np.r_[0, edges]
+        ends = np.r_[edges, states.size]
+        lens = ends - starts
+        short = np.flatnonzero((lens < min_bins) & (states[starts] != 0))
+        if short.size == 0 or lens.size < 2:      # nothing short, or a single run
+            break
+        i = short[np.argmin(lens[short])]         # shortest blip first
+        prev_len = lens[i - 1] if i > 0 else -1
+        next_len = lens[i + 1] if i + 1 < lens.size else -1
+        states[starts[i]:ends[i]] = (states[starts[i - 1]] if prev_len >= next_len
+                                     else states[starts[i + 1]])
     return states
 
 
@@ -264,26 +287,29 @@ def enforce_min_duration(states, min_secs=6, dt=1.0):
 #  Full pipeline
 # ---------------------------------------------------------------------------- #
 def score(lfp, fs, emg=None, emg_ts=None, motion=None, motion_ts=None, min_secs=10,
-          swthresh=None, ththresh=None, emgthresh=None, sw_factor=1.0,
+          swthresh=None, ththresh=None, emgthresh=None, sw_factor=SW_THRESH_FACTOR,
           th_factor=TH_THRESH_FACTOR, emg_factor=1.0, theta_lfp=None):
     """Full Buzsáki auto-scoring. Returns a dict with states, timestamps, metrics.
 
     ``lfp`` = slow-wave (cortex) channel; ``theta_lfp`` = optional theta
-    (stratum radiatum) channel — pass both for layer-specific scoring. ``motion``
-    (accelerometer) and/or ``emg`` gate REM on movement quiescence.
+    (stratum radiatum) channel — pass both for layer-specific scoring. REM is
+    gated on movement quiescence, measured from ``emg`` (EMG-from-LFP) and/or
+    ``motion`` (accelerometer); when neither is given the channel's own
+    high-frequency power stands in, so the gate is never simply absent.
     ``sw_factor`` / ``th_factor`` / ``emg_factor`` scale the auto thresholds
     (1.0 = auto), ``min_secs`` the minimum epoch. ``states`` is one HM code
     (1 WAKE / 3 NREM / 5 REM) per 1 s bin; ``timestamps`` bin centres (s).
     """
-    t, sw, thratio, emg_a = compute_metrics(lfp, fs, emg=emg, emg_ts=emg_ts,
-                                            theta_lfp=theta_lfp)
+    t, sw, thratio, emg_a, hf = compute_metrics(lfp, fs, emg=emg, emg_ts=emg_ts,
+                                                theta_lfp=theta_lfp)
     motion_a = None
     if motion is not None:
         motion = np.asarray(motion, dtype=np.float64).ravel()
         if motion_ts is None:
             motion_ts = np.linspace(t[0], t[-1], motion.size)
         motion_a = _norm01(np.interp(t, np.asarray(motion_ts).ravel(), motion))
-    states, thr = cluster_states(sw, thratio, emg_a, motion=motion_a,
+    gate = emg_a if emg_a is not None else (None if motion_a is not None else hf)
+    states, thr = cluster_states(sw, thratio, gate, motion=motion_a,
                                  swthresh=swthresh, ththresh=ththresh,
                                  emgthresh=emgthresh, sw_factor=sw_factor,
                                  th_factor=th_factor, emg_factor=emg_factor)
@@ -294,24 +320,20 @@ def score(lfp, fs, emg=None, emg_ts=None, motion=None, motion_ts=None, min_secs=
         "states": states,
         "timestamps": t,
         "metrics": {"broadbandSlowWave": sw, "thratio": thratio, "emg": emg_a,
-                    "motion": motion_a},
+                    "motion": motion_a, "hf": hf},
         "thresholds": thr,
     }
 
 
 def save(result, path):
     """Save an auto-scoring result to ``path`` (.npz), readable by the GUI panel."""
-    np.savez(path,
-             states=result["states"].astype(np.int16),
-             timestamps=result["timestamps"].astype(np.float64),
-             broadbandSlowWave=result["metrics"]["broadbandSlowWave"],
-             thratio=result["metrics"]["thratio"],
-             emg=(result["metrics"]["emg"] if result["metrics"]["emg"] is not None
-                  else np.array([])),
-             swthresh=result["thresholds"]["swthresh"],
-             ththresh=result["thresholds"]["ththresh"],
-             emgthresh=(result["thresholds"]["emgthresh"]
-                        if result["thresholds"]["emgthresh"] is not None else np.nan))
+    fields = {"states": result["states"].astype(np.int16),
+              "timestamps": result["timestamps"].astype(np.float64)}
+    for name, values in result["metrics"].items():
+        fields[name] = np.array([]) if values is None else np.asarray(values)
+    for name, value in result.get("thresholds", {}).items():
+        fields[name] = np.nan if value is None else value
+    np.savez(path, **fields)
     return path
 
 
@@ -356,8 +378,22 @@ def _load_motion(lfp_dir, fs):
     return m, np.arange(m.size) * (100.0 / fs)
 
 
+def _resolve_model(model, lfp_dir):
+    """Turn the ``model`` argument into ``(model dict, name)``, or ``(None, None)``."""
+    if model is None:
+        return None, None
+    import fit_auto_score as fa
+    if isinstance(model, dict):
+        return model, "fitted model"
+    path = fa.find_model(lfp_dir) if model == "auto" else model
+    if path is None:
+        return None, None
+    return fa.load_model(path), Path(path).name
+
+
 def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
-                          sr_channel=None, fs=None, **kw):
+                          sr_channel=None, fs=None, model="auto",
+                          use_motion=False, **kw):
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
     Layer-specific channels (recommended, per-rat): ``ctx_channel`` (cortex) drives
@@ -365,6 +401,14 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     theta/REM metric. If only ``channel`` (or none) is given, a single channel
     drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
     (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
+
+    ``model`` selects the scorer: ``"auto"`` uses a model fitted to hand-scored
+    sessions when one is found in the folder (see ``fit_auto_score.py``), a path
+    or loaded model forces one, and ``None`` forces the threshold scorer.
+
+    ``use_motion`` adds the accelerometer to the REM movement gate. Off by
+    default: not every session records motion, so leaving it out keeps one
+    session's scoring comparable with the next.
 
     ``fs`` overrides the sampling rate detected from lfp_timestamps.npy — the
     setup GUI passes its validated LFP rate. When detecting, a rate above
@@ -405,12 +449,25 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     if sr_channel is not None:
         print(f"  slow-wave from cortex ch {sw_ch}, theta from SR ch {sr_channel}")
 
+    fitted, model_name = _resolve_model(model, lfp_dir)
+    if fitted is not None:
+        import fit_auto_score as fa
+        t, X = fa.extract_features(lfp, fs, sr_lfp=theta_lfp)
+        states = fa.predict(fitted, X)
+        if kw.get("min_secs"):
+            states = enforce_min_duration(states, min_secs=kw["min_secs"])
+        names = [str(s) for s in fitted["features"]]
+        print(f"  scored with {model_name} ({', '.join(names)}; "
+              f"{len(fitted['codes'])} states)")
+        return {"states": states, "timestamps": t, "model": model_name,
+                "metrics": dict(zip(names, X.T)), "thresholds": {}}, sw_ch
+
     emg, emg_ts = _load_emg(lfp_dir, fs)
-    motion, motion_ts = _load_motion(lfp_dir, fs)
+    motion, motion_ts = (_load_motion(lfp_dir, fs) if use_motion else (None, None))
     src_name = ("motion+EMG" if (motion is not None and emg is not None)
                 else "motion" if motion is not None
-                else "EMG" if emg is not None
-                else "none (theta only — REM may be over-called)")
+                else "EMG-from-LFP" if emg is not None
+                else f"LFP {int(HF_BAND[0])}-{int(HF_BAND[1])} Hz power")
     print(f"  REM movement gate from: {src_name}")
     return score(lfp, fs, emg=emg, emg_ts=emg_ts, motion=motion, motion_ts=motion_ts,
                  theta_lfp=theta_lfp, **kw), sw_ch
@@ -428,10 +485,17 @@ def main():
                     help=f"Output .npz (default: <lfp_folder>/{DEFAULT_OUT}).")
     ap.add_argument("--min_secs", type=float, default=10.0,
                     help="Minimum state-run duration (s).")
+    ap.add_argument("--model", default="auto",
+                    help="Fitted model to score with (default: use one found in "
+                         "the folder; 'none' forces the threshold scorer).")
+    ap.add_argument("--use_motion", action="store_true",
+                    help="Add the accelerometer to the REM movement gate.")
     args = ap.parse_args()
 
     res, ch = score_from_lfp_output(args.lfp_folder, channel=args.channel,
-                                    min_secs=args.min_secs)
+                                    min_secs=args.min_secs,
+                                    model=None if args.model == "none" else args.model,
+                                    use_motion=args.use_motion)
     if args.out:
         out = args.out
     else:
@@ -442,14 +506,16 @@ def main():
 
     st = res["states"]
     total = st.size or 1
-    names = {WAKE: "WAKE", NREM: "NREM", REM: "REM"}
+    names = {WAKE: "WAKE", NREM: "NREM", 4: "INTER", REM: "REM"}
     print(f"Scored channel {ch}: {st.size} bins")
     for code, name in names.items():
-        pct = 100.0 * np.count_nonzero(st == code) / total
-        print(f"  {name:5}: {pct:5.1f}%")
+        n = np.count_nonzero(st == code)
+        if n:
+            print(f"  {name:5}: {100.0 * n / total:5.1f}%")
     thr = res["thresholds"]
-    print(f"  thresholds: SW={thr['swthresh']:.3f} theta={thr['ththresh']:.3f} "
-          f"EMG={thr['emgthresh']}")
+    if thr:
+        print(f"  thresholds: SW={thr['swthresh']:.3f} theta={thr['ththresh']:.3f} "
+              f"EMG={thr['emgthresh']}")
     print(f"Saved {out}")
 
 

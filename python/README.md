@@ -163,21 +163,36 @@ from three metrics — all 0–1 normalised, each split at its bimodal-histogram
 
 Classified in the paper's order: `NREM = SW>thr`; `REM = ~NREM & theta>thr &
 EMG<thr`; `WAKE` = the rest (movement, microarousals and quiet wake all count
-as WAKE). The automatic labels use only these three states — intermediate
-sleep is a manual-only label, so it never appears in the `Auto` bar. Without an
-EMG/motion signal the REM gate
-uses theta only (REM tends to be over-called — supply `emg_from_lfp*.npy` for
-a proper split).
+as WAKE). This threshold scorer produces only these three states — it has no
+notion of intermediate sleep. A model fitted to your own scoring does score
+intermediate: see [Fitting the auto-scorer](#fitting-the-auto-scorer-to-your-own-scoring).
+
+The REM movement gate uses the EMG-from-LFP (`emg_from_lfp*.npy`) when the
+folder has it, and otherwise the scored channel's own **275–500 Hz power** —
+muscle tone read off the LFP itself, which separates WAKE from sleep as well as
+a recorded EMG does. So every session gets a gate, including those with no
+accelerometer. Accelerometer motion is added only with `--use_motion`: not
+every session records it, and a threshold that leans on it does not transfer to
+the sessions that don't.
+
+Two thresholds were re-fitted against a hand-scored session (4 h, all states):
+`SW_THRESH_FACTOR = 1.25`, because the slow-wave histogram dip sits *below* the
+REM mode and the raw cutoff therefore labels most REM as NREM; and the movement
+ceiling, now the 60th percentile of the movement signal rather than its bimodal
+dip, which lands in very different places on the EMG and high-frequency traces.
+Together they take agreement with the hand scoring from 80% (κ 0.57) to 87%
+(κ 0.75), mostly by recovering REM (recall 0.37 → 0.81).
 
 Generate labels for a folder:
 
 ```bash
 python buzsaki_score.py --lfp_folder /path/to/LFP_Output   # writes buzsaki_states.npz
+python buzsaki_score.py --lfp_folder ... --model none      # thresholds, ignoring any fitted model
 ```
 
 ### Seeing the labels in the editor
 
-The state editor shows an **extra colour bar** (`W`/`N`/`R`) above the manual state bar
+The state editor shows an **extra colour bar** (`W`/`N`/`I`/`R`) above the manual state bar
 whenever auto-labels are supplied — it pans and zooms in lock-step with everything else,
 so you can score by hand while comparing against the automatic labels. The setup GUI's
 **"Show Buzsáki auto-score"** checkbox loads `buzsaki_states.npz` from the LFP/output
@@ -186,6 +201,67 @@ folder if present, or computes it on launch. Programmatically:
 ```python
 StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 ```
+
+## Fitting the auto-scorer to your own scoring
+
+`fit_auto_score.py` replaces those hand-set cutoffs with boundaries *fitted* to
+sessions you scored yourself — a Gaussian model per state plus the transition
+matrix from your own hypnogram, decoded with Viterbi:
+
+```bash
+python fit_auto_score.py --lfp_folder /path/to/LFP_Output \
+                         --labels /path/to/results/results_2026-09-17_you.npz
+```
+
+It prints held-out agreement (5 contiguous time blocks — never shuffled bins,
+since neighbouring seconds are nearly identical) and writes
+`<prefix>sleep_score_model.npz` into the LFP folder. From then on
+`buzsaki_score.py` and the setup GUI use it automatically and the threshold
+multipliers no longer apply; delete the file to go back. Repeat
+`--lfp_folder`/`--labels` to fit several sessions at once, which is the better
+way to use it — one session teaches it that session's electrodes.
+
+Seven features per 1 s bin, each smoothed 15 s then z-scored within the session
+(so electrode gain cancels), **all from the LFP** — no motion, no EMG file:
+
+| Feature | What | Separates |
+|---------|------|-----------|
+| `sw` | z(log δ 0.5–4) − z(log γ 40–100), cortex | NREM |
+| `thdelta` | log θ 5–10 − log δ 0.5–4, cortex | REM (AUC 0.99 vs NREM, against 0.89 for the 5–10/2–16 ratio) |
+| `hf` | log 275–500 Hz, cortex | WAKE (AUC 0.96, vs 0.96 for recorded EMG and 0.89 for the accelerometer) |
+| `spindle` | log 10–16 Hz − log 1–100 Hz, stratum radiatum | **intermediate** (AUC 0.97 vs everything else) |
+| `spindle_hi` | log 13–18 Hz, stratum radiatum | intermediate vs REM (AUC 0.88) |
+| `sr_thdelta` | log θ 5–10 − log δ 0.5–4, stratum radiatum | REM |
+| `amp_cv` | CV of the 1–30 Hz envelope within each second, cortex | REM, which holds a steadier amplitude than any other state (AUC 0.88 vs intermediate); lifts REM precision 0.81 → 0.90 |
+
+Intermediate sleep is fitted whenever the labels contain at least
+`MIN_INTER_BINS` (60) of it; `--no_intermediate` scores WAKE/NREM/REM only.
+Held-out agreement on our hand-scored session, 4 states against 3:
+
+| | accuracy | κ | WAKE | NREM | INTER | REM |
+|---|---|---|---|---|---|---|
+| 4 states | 0.906 | 0.817 | 0.90 / 0.86 | 0.92 / 0.94 | **0.71 / 0.56** | 0.85 / 0.90 |
+| 3 states | 0.912 | 0.825 | 0.90 / 0.86 | 0.92 / 0.94 | — | 0.96 / 0.92 |
+
+*(recall / precision per state)*. For reference, two passes of hand scoring over
+that same session differ on 3.7% of bins, so much of what is left is boundary
+disagreement.
+
+Scoring intermediate costs a little REM recall (0.96 → 0.85) and buys all of it
+back as intermediate. Read its bin-level precision (0.56) with care: the state
+covers ~1% of the recording, so a single boundary disagreement dominates it.
+Epoch-wise, the model **found all 6 hand-scored intermediate epochs** and
+proposed 3 extra — two of them at the onset of the two REM epochs scored as
+going straight from NREM to REM (so it is proposing a transition the hand
+scoring did not mark, not inventing one out of nowhere), and one 13 s epoch
+inside NREM. That is why the report prints the epoch count next to the
+bin-level numbers.
+
+Two decode rules keep intermediate honest, since a plain HMM enters it at REM
+onset and stays there for the whole REM epoch: its epochs are capped at
+`INTER_MAX_S` (30 s — the hand-scored ones run 10–46 s) and it carries a small
+penalty `INTER_BIAS`. Both are stored in the model file and adjustable
+(`--inter_max_s`, `--inter_bias`).
 
 ## Files
 
@@ -196,6 +272,7 @@ StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 | `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` (+ auto-label panel) |
 | `processing.py` | Preprocessing + multitaper spectrogram |
 | `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
+| `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
 | `test_pipeline.py` | Headless smoke test (`python test_pipeline.py`) |
 
 ## Differences from the MATLAB version

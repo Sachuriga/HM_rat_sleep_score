@@ -351,14 +351,19 @@ class SetupGUI(QMainWindow):
         self.thr_grid = QGridLayout()
         self.thr_grid.setHorizontalSpacing(12)
         self.thr_grid.setVerticalSpacing(4)
-        self.swf_edit = QLineEdit("1.0")
+        self.swf_edit = QLineEdit(str(_bz.SW_THRESH_FACTOR))
         self.thf_edit = QLineEdit(str(_bz.TH_THRESH_FACTOR))
         self.emgf_edit = QLineEdit("1.0")
         self.minsec_edit = QLineEdit("10")
-        fields = [("SW×  (NREM)", self.swf_edit, "Slow-wave threshold multiplier. ↓ = more NREM."),
+        fields = [("SW×  (NREM)", self.swf_edit,
+                   "Slow-wave threshold multiplier. ↓ = more NREM. "
+                   f"{_bz.SW_THRESH_FACTOR} matches our hand scoring; 1.0 = the raw "
+                   "histogram dip, which labels most REM as NREM."),
                   ("θ×  (REM)", self.thf_edit, "Theta threshold multiplier. ↓ = more REM."),
                   ("EMG×  (REM gate)", self.emgf_edit,
-                   "Movement ceiling for REM: bins with EMG/motion above it can't be REM. ↑ = more REM."),
+                   "Movement ceiling for REM: bins with EMG/motion above it can't be REM. "
+                   f"1.0 = the {_bz.MOVE_GATE_PCT:.0f}th percentile of the movement "
+                   "signal; ↑ = more REM."),
                   ("min ep (s)", self.minsec_edit, "Shortest epoch kept, in seconds.")]
         for i, (lbl, edit, tip) in enumerate(fields):
             head = self._field_label(lbl)
@@ -371,6 +376,10 @@ class SetupGUI(QMainWindow):
         box3.addLayout(self.thr_grid)
         box3.addWidget(self._hint(
             "1.0 = automatic threshold  ·  ↓SW → more NREM  ·  ↓θ → more REM  ·  ↑EMG → laxer REM gate"))
+        box3.addWidget(self._hint(
+            "A sleep_score_model.npz in the LFP folder (fit_auto_score.py) scores "
+            "instead — intermediate sleep included — and these multipliers no "
+            "longer apply."))
         v.addWidget(c3)
         v.addStretch(1)
 
@@ -730,7 +739,8 @@ class SetupGUI(QMainWindow):
             from processing import output_prefix
             pfx = output_prefix(self.lfp_folder)
             bz.save(res, os.path.join(self.lfp_folder, f"{pfx}{bz.DEFAULT_OUT}"))
-            self._set_status("Buzsáki auto-score recomputed.", OK_GREEN)
+            scorer = res.get("model") or "threshold scorer"
+            self._set_status(f"Auto-score recomputed ({scorer}).", OK_GREEN)
             return res["states"], res["timestamps"]
         except Exception as exc:
             import traceback

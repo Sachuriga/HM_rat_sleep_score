@@ -94,7 +94,10 @@ The setup GUI opens. Steps:
    name is kept — no "Labeled by" prompt — and saving updates that same file
    instead of writing a new one. **Clear** empties the field again.
 6. **Parameters** — sampling rate, session name, motion type, and optional
-   Buzsáki auto-scoring with adjustable thresholds.
+   auto-scoring with adjustable thresholds. A `sleep_score_model.npz` in the
+   LFP folder — see
+   [fitting the auto-scorer](python/README.md#fitting-the-auto-scorer-to-your-own-scoring)
+   — scores in place of the thresholds.
 
 Click **Launch State Editor**. Press `h` in the editor for the full list of
 keyboard/mouse controls.
@@ -150,7 +153,8 @@ python/
 ├── setup_gui.py        # setup GUI (folder/channel/parameter selection)
 ├── state_editor.py     # interactive spectrogram + scoring editor
 ├── processing.py       # LFP preprocessing, spectrograms, motion processing
-├── buzsaki_score.py    # optional Buzsáki auto-scoring
+├── buzsaki_score.py    # optional Buzsáki auto-scoring (WAKE/NREM/REM)
+├── fit_auto_score.py   # fit the auto-scorer to hand-scored sessions (+ intermediate)
 └── test_pipeline.py    # headless smoke test
 LFP_Output/             # example data folder
 ```

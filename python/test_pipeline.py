@@ -2,6 +2,9 @@
 import os
 os.environ["MPLBACKEND"] = "Agg"
 
+import tempfile
+TMP = tempfile.mkdtemp(prefix="sleepscore-test-")
+
 import numpy as np
 from processing import (mad_clip, notch_filter, whiten_ar1,
                         multitaper_spectrogram, compute_channel_spectrogram,
@@ -47,7 +50,7 @@ motion = downsample_motion(rng.standard_normal(dur * fs), raw_eeg[0].size, fs)
 print(f"motion bins {motion.size}, spectrogram bins {to.size}")
 
 # Build the editor headlessly and exercise scoring/save/load/transitions
-ed = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder=TMP)
 assert (ed.states == 3).all(), "bins should default to NREM"
 ed._apply_state(10, 25, 3)     # NREM 10-25 s
 ed._apply_state(40, 55, 5)     # REM  40-55 s
@@ -57,7 +60,7 @@ assert (ed.states[40:56] == 5).all()
 ed._undo()                     # undoes the awake block
 assert (ed.states[60:71] == 3).all()   # back to the NREM default
 
-path = "/tmp/test-states.mat"
+path = os.path.join(TMP, "test-states.mat")
 ed.save_states(path)
 from scipy.io import loadmat
 d = loadmat(path)
@@ -109,7 +112,7 @@ ed.labeled_by = "Test User"
 first = ed.save_results()
 assert len(glob.glob(os.path.join(rdir, "*.npz"))) == 1
 
-ed2 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed2 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder=TMP)
 ed2.results_folder = rdir
 assert ed2.labeled_by is None              # would prompt on launch...
 ed2.load_states(first)
@@ -129,10 +132,10 @@ assert _labeled_by_of({}, "session-states.npz") is None
 print("resume round-trip ok: same scorer, same file")
 
 # Intermediate sleep (4) is scoreable and round-trips through a save/load
-ed3 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed3 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder=TMP)
 ed3._apply_state(30, 45, 4)
 assert (ed3.states[30:46] == 4).all(), "intermediate not applied"
-ip = ed3.save_states_npz("/tmp/test-inter.npz")
+ip = ed3.save_states_npz(os.path.join(TMP, "test-inter.npz"))
 ed3.states[:] = 0
 ed3.load_states(ip)
 assert (ed3.states[30:46] == 4).all(), "intermediate lost in round trip"
@@ -178,7 +181,7 @@ assert absorb_short_runs([1]*8 + [3]*2 + [5]*2 + [1]*8, 5).tolist() == [1]*20  #
 assert absorb_short_runs([3]*4, 5).tolist() == [3]*4          # one run: untouched
 assert absorb_short_runs([], 5).tolist() == []
 
-ed4 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed4 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder=TMP)
 ed4._apply_state(40, 55, 5)
 snapshot = ed4.states.copy()
 ed4._apply_state(60, 70, 1)        # leaves a 4 s scrap of NREM at 56-60 s
