@@ -117,6 +117,50 @@ channel number, and the status bar names the file the scoring will be written
 to. There is no Save button and no unsaved marker: closing the window saves the
 scoring automatically (you are only prompted if that write fails).
 
+## One NWB per session
+
+The tracker's **step 8** packages everything this tool needs into the session
+NWB (`<op>/<Rat>_<YYYYMMDD>.nwb`) — `acquisition/lfp`, `acquisition/emg_from_lfp`,
+`acquisition/motion` and `processing/sleep/sleep_channels`. Steps **w**
+(behaviour/trials) and **u** (units) then *append* to that same file, so it is
+never rewritten and nothing stored in it is lost.
+
+Point the setup GUI at a folder holding that `.nwb` and it reads the LFP
+straight out of it — one channel is sliced from HDF5 at a time, so a multi-hour
+session never loads into memory. The loose `.npy` files still work as a
+fallback when there is no NWB.
+
+Each scorer's result is written back into the same file as
+`processing/sleep/states_<scorer>` (a `TimeIntervals` table of contiguous
+epochs). **One entry per scorer**: re-saving replaces that scorer's entry
+instead of piling up a new file per day.
+
+### Continuing someone's scoring
+
+Card 1 has a **State scored by** dropdown listing every scoring already in the
+NWB (newest first). It starts blank — nothing is resumed by accident. Pick a
+scorer and their labels load, their name carries through (you are *not* asked
+for a name again), and saving updates that same entry.
+
+### Keeping ground truth away from students
+
+`isolate_labels.py` splits a session into a label-free copy and the labels
+themselves. The original is never modified.
+
+```bash
+# what's in there
+python isolate_labels.py --nwb Rat6_20260629.nwb --list
+
+# student copy (no scorings) + ground truth pulled out to ./truth/
+python isolate_labels.py --nwb Rat6_20260629.nwb --extract truth
+
+# keep one scoring in the copy, as a worked example
+python isolate_labels.py --nwb Rat6_20260629.nwb --keep Sachuriga
+```
+
+`Rat6_20260629_nolabels.nwb` holds the full recording with nothing pre-filled —
+hand that to students; keep `truth/` for yourself.
+
 ## Output
 
 Saving writes `<SessionName>-states.mat` to the output folder in the **same
@@ -334,7 +378,9 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `sleepscore.py` | Entry point (opens the setup GUI) |
 | `setup_gui.py` | Tkinter setup launcher — port of `Sleep_score_HM_neuron.m` |
 | `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` (+ auto-label panel) |
-| `processing.py` | Preprocessing + multitaper spectrogram |
+| `processing.py` | Preprocessing + multitaper spectrogram (reads LFP from NWB or `.npy`) |
+| `sleep_nwb.py` | The session-NWB layout: inputs, scorings, label stripping (kept identical in the tracker repo) |
+| `isolate_labels.py` | Split a session into a label-free student copy + the ground truth |
 | `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
 | `test_pipeline.py` | Headless smoke test (`python test_pipeline.py`) |

@@ -135,7 +135,10 @@ class SetupGUI(QMainWindow):
         self.lfp_folder = ""
         self.emg_file = ""
         self.out_folder = ""
-        self.prev_file = ""         # scoring to resume; empty = start a fresh one
+        self.motion_from_nwb = False  # no motion .npy, but the NWB carries it
+        self.nwb_path = ""          # session NWB (tracker step 8), "" if none found
+        self.scorings = []          # scorings stored in it, newest first
+        self.prev_scoring = None    # the one to continue; None = start a fresh one
         self.lfp_source = None      # dict from find_lfp_source, set on folder select
         self.sleep_channels = {}    # {role: tetrode} from sleep_channels.npy
 
@@ -143,6 +146,7 @@ class SetupGUI(QMainWindow):
         self.resize(860, 720)
         self.setMinimumSize(720, 600)
         self._build()
+        self._reload_scorings()     # start on the blank entry: nothing resumed
         self._update_ready()
 
     # ------------------------------------------------------------------ layout
@@ -282,15 +286,23 @@ class SetupGUI(QMainWindow):
 
         box.addWidget(self._divider())
 
-        box.addWidget(self._field_label("Resume from previous scoring (optional)"))
-        self.prev_edit = QLineEdit()
+        box.addWidget(self._field_label("State scored by"))
+        prow = QHBoxLayout()
+        prow.setSpacing(8)
+        self.prev_combo = QComboBox()
+        self.prev_combo.setToolTip(
+            "Continue a scoring already stored in the session .nwb: its labels are "
+            "loaded, its scorer name is kept (you are not asked again), and saving "
+            "updates that same scorer instead of writing a new file.\n"
+            "Leave on the blank entry to start a fresh scoring.")
+        self.prev_combo.currentIndexChanged.connect(self._on_prev_pick)
+        prow.addWidget(self.prev_combo, 1)
         self.prev_dot = self._dot()
-        box.addLayout(self._path_row(
-            self.prev_edit, self._sel_prev, self.prev_dot,
-            "leave empty to start a fresh scoring, or browse for a saved one",
-            "Continue an earlier scoring: its labels are shown, its scorer name "
-            "is kept (no prompt), and saving updates that same file.",
-            clear_cb=self._clear_prev))
+        prow.addWidget(self.prev_dot)
+        box.addLayout(prow)
+        self.prev_hint = self._hint(
+            "Select the LFP folder first — scorings are read from the session .nwb.")
+        box.addWidget(self.prev_hint)
         v.addWidget(c1)
 
         # ============ Card 2: recording & parameters ======================
@@ -426,13 +438,15 @@ class SetupGUI(QMainWindow):
 
     def _update_ready(self):
         """Enable Launch only when the three required paths are set."""
-        ready = bool(self.lfp_folder and self.emg_file and self.out_folder)
+        ready = bool(self.lfp_folder and (self.emg_file or self.motion_from_nwb)
+                     and self.out_folder)
         self.launch_btn.setEnabled(ready)
         if ready:
             self.launch_btn.setText("▶  Launch State Editor")
         else:
             missing = [name for name, val in
-                       [("LFP folder", self.lfp_folder), ("motion/EMG file", self.emg_file),
+                       [("LFP folder", self.lfp_folder),
+                        ("motion/EMG file", self.emg_file or self.motion_from_nwb),
                         ("output folder", self.out_folder)] if not val]
             self.launch_btn.setText(f"Launch State Editor  (set {', '.join(missing)})")
 
@@ -451,7 +465,10 @@ class SetupGUI(QMainWindow):
         n_samples = src["n_samples"]
         chans = src["channels"]
 
-        fs = detect_sampling_rate(find_output(folder, "lfp_timestamps.npy"))
+        # An NWB-backed source carries its own rate (read off acquisition/lfp's
+        # timestamps); otherwise fall back to lfp_timestamps.npy.
+        fs = src.get("fs") or detect_sampling_rate(
+            find_output(folder, "lfp_timestamps.npy"))
         rate_note = ""
         # LFP for sleep scoring is ~250–2000 Hz. A detected rate this high means
         # lfp_timestamps.npy holds the RAW acquisition rate (e.g. 30 kHz), not the
@@ -551,7 +568,27 @@ class SetupGUI(QMainWindow):
                 self.emg_auto.setStyleSheet(f"color: {OK_GREEN}; font-size: 11px;")
                 self._set_dot(self.emg_dot, "ok")
                 break
+        # No loose .npy? The session NWB carries motion/EMG too, so scoring can
+        # run off that single file alone.
+        self.motion_from_nwb = False
         if not self.emg_file:
+            import sleep_nwb as snwb
+            found = snwb.find_session_nwb(folder)
+            if found is not None:
+                inputs = None
+                try:
+                    inputs = snwb.read_sleep_inputs(found)
+                    self.motion_from_nwb = (inputs.get("motion") is not None
+                                            or inputs.get("emg") is not None)
+                except Exception as exc:
+                    print(f"Warning: could not read motion from the NWB: {exc}")
+                finally:
+                    snwb.close_inputs(inputs)
+            if self.motion_from_nwb:
+                self.emg_auto.setText(f"✓ Using motion/EMG from {os.path.basename(str(found))}")
+                self.emg_auto.setStyleSheet(f"color: {OK_GREEN}; font-size: 11px;")
+                self._set_dot(self.emg_dot, "ok")
+        if not self.emg_file and not self.motion_from_nwb:
             self.emg_auto.setText("No EMG file auto-detected — browse for one manually.")
             self.emg_auto.setStyleSheet(f"color: {WARN}; font-size: 11px;")
             self._set_dot(self.emg_dot, "warn")
@@ -559,6 +596,12 @@ class SetupGUI(QMainWindow):
             self.out_folder = folder
             self.out_edit.setText(folder)
             self._set_dot(self.out_dot, "ok")
+
+        # the session NWB written by tracker step 8 — the store for scorings
+        import sleep_nwb as snwb
+        found = snwb.find_session_nwb(folder)
+        self.nwb_path = str(found) if found else ""
+        self._reload_scorings()
         self._update_ready()
 
     def _sel_emg(self):
@@ -582,29 +625,60 @@ class SetupGUI(QMainWindow):
             self._set_dot(self.out_dot, "ok")
             self._update_ready()
 
-    def _sel_prev(self):
-        start = self.out_folder or self.lfp_folder or os.getcwd()
-        f, _ = QFileDialog.getOpenFileName(self, "Select previous scoring", start,
-                                           "Scoring (*.npz *.mat)")
-        if not f:
-            return
-        self.prev_file = f
-        self.prev_edit.setText(f)
-        self.prev_edit.setToolTip(f)
-        self._set_dot(self.prev_dot, "ok")
+    def _reload_scorings(self):
+        """Refill the "State scored by" dropdown from the session NWB.
 
-    def _clear_prev(self):
-        """Empty the resume field — the next launch starts a fresh scoring."""
-        self.prev_file = ""
-        self.prev_edit.clear()
-        self.prev_edit.setToolTip("")
+        Always starts blank (a fresh scoring) so nothing is resumed by accident;
+        every scorer already stored in the NWB follows, newest first.
+        """
+        import sleep_nwb as snwb
+
+        self.scorings = []
+        self.prev_scoring = None
+        self.prev_combo.blockSignals(True)
+        self.prev_combo.clear()
+        self.prev_combo.addItem("")                     # blank = start fresh
+        try:
+            self.scorings = snwb.list_scorings(self.nwb_path) if self.nwb_path else []
+        except Exception as exc:
+            print(f"Warning: could not list scorings: {exc}")
+        for entry in self.scorings:
+            self.prev_combo.addItem(entry["label"])
+        self.prev_combo.setCurrentIndex(0)
+        self.prev_combo.blockSignals(False)
         self._set_dot(self.prev_dot, "off")
+
+        if not self.lfp_folder:
+            self.prev_hint.setText(
+                "Select the LFP folder first — scorings are read from the session .nwb.")
+        elif not self.nwb_path:
+            self.prev_hint.setText(
+                "No .nwb in this folder — run tracker step 8 to create it. "
+                "Scoring still works; results are saved to the results/ folder.")
+        elif self.scorings:
+            self.prev_hint.setText(
+                f"{len(self.scorings)} scoring(s) in {os.path.basename(self.nwb_path)} "
+                f"— pick one to continue it, or leave blank for a fresh one.")
+        else:
+            self.prev_hint.setText(
+                f"No scorings yet in {os.path.basename(self.nwb_path)} — "
+                f"this will be the first.")
+
+    def _on_prev_pick(self, index):
+        """Remember which stored scoring to resume (index 0 = start fresh)."""
+        self.prev_scoring = (self.scorings[index - 1]
+                             if 1 <= index <= len(self.scorings) else None)
+        self._set_dot(self.prev_dot, "ok" if self.prev_scoring else "off")
+        if self.prev_scoring:
+            self.prev_hint.setText(
+                f"Continuing {self.prev_scoring.get('scorer')}'s scoring — saving "
+                f"updates that entry, and you won't be asked for a name.")
 
     # ------------------------------------------------------------------ launch
     def _launch(self):
         if not self.lfp_folder:
             return self._set_status("Error: select an LFP folder.", ERR)
-        if not self.emg_file:
+        if not self.emg_file and not self.motion_from_nwb:
             return self._set_status("Error: select a motion/EMG file.", ERR)
         if not self.out_folder:
             return self._set_status("Error: select an output folder.", ERR)
@@ -676,7 +750,8 @@ class SetupGUI(QMainWindow):
 
             mode = MOTION_MODES.get(self.motion_combo.currentText(), "accelerometer")
             self._set_status(f"Loading + processing motion ({mode}) ...", "#0000aa")
-            motion_raw = np.load(self.emg_file, mmap_mode="r")
+            motion_raw = (np.load(self.emg_file, mmap_mode="r") if self.emg_file
+                          else self._motion_from_nwb())
             motion = process_motion(motion_raw, raw_eeg[0].size, eeg_fs, mode=mode)
             if motion.size != to.size:
                 motion = np.interp(np.linspace(0, 1, to.size),
@@ -691,27 +766,62 @@ class SetupGUI(QMainWindow):
         auto_states, auto_ts = self._buzsaki_labels(chs, eeg_fs)
         overlays = self._load_overlays()
 
+        # Continuing a stored scoring? Load its labels and carry its scorer name
+        # through, so the editor neither asks for a name nor starts a new entry.
+        states, labeled_by = None, None
+        if self.prev_scoring:
+            import sleep_nwb as snwb
+            scorer = self.prev_scoring.get("scorer")
+            self._set_status(f"Loading {scorer}'s scoring from "
+                             f"{os.path.basename(self.nwb_path)} ...", "#0000aa")
+            try:
+                states, _, _ = snwb.read_scoring(
+                    self.nwb_path, name=self.prev_scoring["name"], timestamps=to)
+                labeled_by = scorer
+            except Exception as exc:
+                print(f"Warning: could not load the stored scoring: {exc}")
+                states = None
+
         self._set_status("Launching state editor ...", OK_GREEN)
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
                              out_folder=self.out_folder, chs=chs,
                              ch_labels=self._channel_labels(chs),
                              auto_states=auto_states, auto_states_ts=auto_ts,
-                             overlays=overlays,
+                             overlays=overlays, states=states,
+                             labeled_by=labeled_by, nwb_path=self.nwb_path,
                              results_folder=os.path.join(self.lfp_folder, "results"))
-        if self.prev_file and os.path.isfile(self.prev_file):
-            self._set_status(f"Loading previous scoring: "
-                             f"{os.path.basename(self.prev_file)} ...", "#0000aa")
-            try:
-                editor.load_states(self.prev_file)
-            except Exception as exc:
-                print(f"Warning: could not load previous scoring: {exc}")
         self.hide()
         editor.show()
         self.show()
+        self._reload_scorings()      # the scoring just saved joins the dropdown
         saved = getattr(editor, "results_path", None)
-        msg = ("State editor closed." if not saved else
-               f"State editor closed. Scoring saved to {os.path.basename(saved)}.")
+        scorer = getattr(editor, "labeled_by", None)
+        if getattr(editor, "nwb_saved", False):
+            msg = (f"State editor closed. {scorer}'s scoring saved into "
+                   f"{os.path.basename(self.nwb_path)}.")
+        elif saved:
+            msg = f"State editor closed. Scoring saved to {os.path.basename(saved)}."
+        else:
+            msg = "State editor closed."
         self._set_status(msg, OK_GREEN)
+
+    def _motion_from_nwb(self):
+        """Movement trace out of the session NWB (accelerometer, else EMG).
+
+        Used when the folder has no motion ``.npy`` — everything the scorer
+        needs is then read from the one NWB.
+        """
+        import sleep_nwb as snwb
+
+        inputs = None
+        try:
+            inputs = snwb.read_sleep_inputs(self.nwb_path)
+            for key in ("motion", "emg"):
+                if inputs.get(key) is not None:
+                    return np.asarray(inputs[key], dtype=np.float64).ravel()
+            raise ValueError("the NWB has neither motion nor emg_from_lfp")
+        finally:
+            snwb.close_inputs(inputs)
 
     def _buzsaki_labels(self, chs, eeg_fs):
         """Return (states, timestamps) Buzsáki auto-labels to show, or (None, None).

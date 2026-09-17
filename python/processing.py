@@ -218,22 +218,35 @@ def output_prefix(folder):
 
 
 def find_lfp_source(folder: str):
-    """Locate the LFP data in ``folder``, supporting both on-disk layouts.
+    """Locate the LFP data for ``folder``, supporting all three layouts.
 
-    Two layouts are recognised, in priority order:
+    In priority order:
 
+    0. the session ``.nwb`` written by tracker step 8 — ``acquisition/lfp``.
+       One file holds the whole session, so this is preferred when present.
     1. ``lfp_data.npy`` - a single ``[n_samples, n_channels]`` matrix (the
        layout the MATLAB ``Sleep_score_HM_neuron.m`` expects).
     2. ``channels_npy/lfp_ntNN_ch01.npy`` - one file per tetrode/channel
        (the layout the example ``LFP_Output/`` folder actually ships).
 
-    Returns a dict describing the source, or ``None`` if neither is found::
+    Returns a dict describing the source, or ``None`` if none is found::
 
+        {'kind': 'nwb',      'path': ...,  'channels': [1..n], 'n_samples': N}
         {'kind': 'matrix',   'path': ...,  'channels': [1..n], 'n_samples': N}
         {'kind': 'channels', 'files': {ch: path}, 'channels': [...], 'n_samples': N}
 
     ``channels`` is the sorted list of channel numbers available to select.
     """
+    try:
+        import sleep_nwb as snwb
+        nwb = snwb.find_session_nwb(folder)
+        if nwb is not None:
+            info = _nwb_lfp_info(nwb)
+            if info is not None:
+                return info
+    except Exception as exc:
+        print(f"Warning: could not read the session NWB: {exc}")
+
     mat = find_output(folder, "lfp_data.npy")   # prefixed or not
     if mat is not None:
         arr = np.load(mat, mmap_mode="r")
@@ -256,8 +269,40 @@ def find_lfp_source(folder: str):
     return None
 
 
+def _nwb_lfp_info(nwb_path):
+    """Shape/rate of ``acquisition/lfp`` in a session NWB, or None when absent."""
+    from pynwb import NWBHDF5IO
+
+    with NWBHDF5IO(str(nwb_path), mode="r") as io:
+        try:
+            lfp = io.read().get_acquisition("lfp")
+        except Exception:
+            return None
+        shape = lfp.data.shape
+        n_samples = int(shape[0])
+        n_ch = int(shape[1]) if len(shape) > 1 else 1
+        fs = None
+        if lfp.timestamps is not None and n_samples > 1:
+            head = np.asarray(lfp.timestamps[:1000])
+            dt = float(np.median(np.diff(head))) if head.size > 1 else 0.0
+            fs = 1.0 / dt if dt > 0 else None
+        elif getattr(lfp, "rate", None):
+            fs = float(lfp.rate)
+    return {"kind": "nwb", "path": str(nwb_path),
+            "channels": list(range(1, n_ch + 1)),
+            "n_samples": n_samples, "fs": fs}
+
+
 def load_lfp_channel(source: dict, ch: int) -> np.ndarray:
     """Load one channel (1-based) from a source returned by :func:`find_lfp_source`."""
+    if source["kind"] == "nwb":
+        from pynwb import NWBHDF5IO
+        # Sliced straight out of HDF5: only this channel's column is read, so a
+        # multi-GB session never lands in memory.
+        with NWBHDF5IO(source["path"], mode="r") as io:
+            data = io.read().get_acquisition("lfp").data
+            col = data[:, ch - 1] if data.ndim > 1 else data[:]
+            return np.asarray(col, dtype=np.float64).ravel()
     if source["kind"] == "matrix":
         arr = np.load(source["path"], mmap_mode="r")
         col = arr[:, ch - 1] if arr.ndim > 1 else arr

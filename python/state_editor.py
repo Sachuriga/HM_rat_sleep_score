@@ -241,13 +241,18 @@ class StateEditor:
                  out_folder=".", states=None, chs=None, ch_labels=None,
                  auto_states=None, auto_states_ts=None,
                  auto_label="Auto", overlays=None,
-                 labeled_by=None, results_folder=None):
+                 labeled_by=None, results_folder=None, nwb_path=None):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
         # Auto-save on close goes here (results/ inside the input folder).
         self.results_folder = results_folder or os.path.join(out_folder, "results")
         self.labeled_by = labeled_by       # scorer name, asked on launch if unset
+        # Session NWB (tracker step 8). When set it is the primary store: one
+        # entry per scorer, replaced on every save. The results/ .npz+.mat are
+        # still written as a local backup.
+        self.nwb_path = nwb_path or ""
+        self.nwb_saved = False
         # File this scoring saves back into, set when an earlier scoring is
         # loaded; None = save a fresh ``results_<date>_<name>`` file instead.
         self.results_path = None
@@ -1526,9 +1531,37 @@ class StateEditor:
                            "labeled_by": self.labeled_by or "unknown"})
         print(f"Saved results to {npz_path} (+ .mat)")
         self.results_path = npz_path       # further saves update the same file
+        self._save_to_nwb()
         self.dirty = False
         self._set_title()
         return npz_path
+
+    def _save_to_nwb(self):
+        """Store this scoring in the session NWB under the scorer's name.
+
+        Re-saving replaces that scorer's entry rather than adding another, so a
+        scoring that was resumed from the dropdown stays a single entry.
+        Failures are reported but never block the local .npz/.mat save.
+        """
+        if not self.nwb_path or not os.path.isfile(self.nwb_path):
+            return False
+        try:
+            import sleep_nwb as snwb
+            events = (np.array(self.events, dtype=float) if self.events
+                      else np.zeros((0, 2)))
+            name = snwb.write_scoring(
+                self.nwb_path, self.states, self.to,
+                scorer=self.labeled_by or "unknown", events=events,
+                extra={"session": self.base_name,
+                       "channels": [int(c) for c in self.chs]})
+            self.nwb_saved = True
+            print(f"Saved scoring into {os.path.basename(self.nwb_path)} "
+                  f"as processing/sleep/{name}")
+            return True
+        except Exception as exc:
+            print(f"Warning: could not save into {self.nwb_path}: "
+                  f"{type(exc).__name__}: {exc}")
+            return False
 
     def _compute_transitions(self):
         """Nx3 [state, start_s, end_s] from contiguous runs (MATLAB format)."""
