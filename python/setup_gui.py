@@ -502,22 +502,27 @@ class SetupGUI(QMainWindow):
             f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
     def _prefill_sleep_channels(self, folder):
-        """Fill the three channel boxes from the folder's sleep_channels.npy.
+        """Fill the three channel boxes with this rat's cortex / EEG / pyr tetrodes.
 
-        That file is written by the tracker's LFP export from SLEEP_CHANNELS_<rat>
-        (cortex / sr / pyr tetrodes), so the boxes start on the right layers for
-        this rat instead of the generic 1/2/3. Typing over a box still wins.
+        They come from ``SLEEP_CHANNELS_<rat>`` in hm_tracker_paths.txt: the
+        tracker resolves that at step 8 and stores it in the session NWB, and
+        ``load_sleep_channels`` falls back to the legacy ``sleep_channels.npy``
+        and then to the Desktop config itself — so the boxes start on the right
+        layers for this rat rather than a generic 1/2/3, even for a session
+        exported before the NWB existed. Typing over a box still wins.
         """
+        from processing import load_sleep_channels
+
         self.sleep_channels = {}
-        p = find_output(folder, "sleep_channels.npy")
-        if p is None:
-            return
         try:
-            sc = np.load(p, allow_pickle=True).item()
+            sc, source = load_sleep_channels(folder)
         except Exception as exc:
-            print(f"Warning: could not read {p}: {exc}")
+            print(f"Warning: could not resolve sleep channels: {exc}")
             return
-        if not isinstance(sc, dict):
+        if not sc:
+            self._set_status(
+                "No SLEEP_CHANNELS for this rat — set them in "
+                "hm_tracker_paths.txt, or enter the channels by hand.", WARN)
             return
 
         self.sleep_channels = sc
@@ -530,7 +535,7 @@ class SetupGUI(QMainWindow):
             e.setToolTip(f"{label} — tetrode {int(ch)} from SLEEP_CHANNELS_<rat>")
             filled.append(f"{label} {int(ch)}")
         if filled:
-            self._set_status(f"Channels set from sleep_channels.npy: "
+            self._set_status(f"Channels set from {source}: "
                              f"{', '.join(filled)}.", OK_GREEN)
 
     def _channel_labels(self, chs):

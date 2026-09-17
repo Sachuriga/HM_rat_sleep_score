@@ -513,12 +513,12 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     # unless the caller passed them explicitly.
     if ctx_channel is None and sr_channel is None:
         from processing import load_sleep_channels
-        sc = load_sleep_channels(lfp_dir)
+        sc, sc_src = load_sleep_channels(lfp_dir)
         if sc:
             ctx_channel = sc.get("cortex")
             sr_channel = sc.get("sr")
             print(f"  using SLEEP_CHANNELS: cortex={ctx_channel} sr={sr_channel} "
-                  f"pyr={sc.get('pyr')}")
+                  f"pyr={sc.get('pyr')}  (from {sc_src})")
 
     sw_ch = ctx_channel if ctx_channel is not None else (
         channel if channel is not None else src["channels"][0])

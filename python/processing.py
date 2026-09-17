@@ -283,12 +283,73 @@ def find_lfp_source(folder: str):
     return None
 
 
-def load_sleep_channels(folder) -> dict:
-    """Per-rat ``{cortex, sr, pyr}`` tetrode numbers for a session, else ``{}``.
+def config_file() -> str | None:
+    """``hm_tracker_paths.txt`` — ``HM_CONFIG_FILE``, else the one on the Desktop."""
+    p = os.environ.get("HM_CONFIG_FILE", "").strip()
+    if p and os.path.isfile(p):
+        return p
+    default = os.path.join(os.path.expanduser("~"), "Desktop", "hm_tracker_paths.txt")
+    return default if os.path.isfile(default) else None
 
-    Prefers the session NWB — a folder holding only a ``.nwb`` (the copy handed
-    to students, say) still resolves its layers — and falls back to the loose
-    ``sleep_channels.npy``.
+
+def parse_sleep_channels(value) -> dict:
+    """``'cortex:NT24 sr:NT16 pyr:NT30'`` -> ``{'cortex': 24, 'sr': 16, 'pyr': 30}``.
+
+    Accepts ``role:NT<t>`` or bare ``role:<t>``, separated by spaces or commas —
+    the same spelling ``SLEEP_CHANNELS_<rat>`` uses in hm_tracker_paths.txt.
+    """
+    out = {}
+    for token in re.split(r"[,\s]+", str(value or "").strip()):
+        if ":" not in token:
+            continue
+        role, ch = token.split(":", 1)
+        m = re.search(r"(\d+)", ch)
+        if m:
+            out[role.strip().lower()] = int(m.group(1))
+    return out
+
+
+def sleep_channels_from_config(rat, config=None) -> dict:
+    """``SLEEP_CHANNELS_<rat>`` read straight from hm_tracker_paths.txt.
+
+    The tracker resolves this at step 8 and stores it in the session NWB, so
+    this is the fallback for a session exported before that (or one whose NWB
+    was made elsewhere). ``rat`` is a token like ``'Rat5'``.
+    """
+    path = config or config_file()
+    if not path or not rat:
+        return {}
+    key = f"sleep_channels_{rat}".lower()
+    try:
+        for raw in open(path, errors="replace"):
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if "".join(k.split()).lower() == key:
+                return parse_sleep_channels(v)
+    except OSError as exc:
+        print(f"Warning: could not read {path}: {exc}")
+    return {}
+
+
+def rat_token(folder) -> str:
+    """``'Rat5'`` for a session folder, from its file prefix. ``''`` if unknown."""
+    m = re.match(r"^([A-Za-z]+\d+)_", output_prefix(folder) or "")
+    return m.group(1) if m else ""
+
+
+def load_sleep_channels(folder) -> tuple[dict, str]:
+    """Per-rat ``{cortex, sr, pyr}`` tetrodes for a session, and where they came from.
+
+    Tried in order, so the answer is the most session-specific one available:
+
+    1. the session NWB — what the tracker resolved for THIS recording (a folder
+       holding only a ``.nwb`` still knows its layers);
+    2. the legacy ``sleep_channels.npy``;
+    3. ``SLEEP_CHANNELS_<rat>`` in hm_tracker_paths.txt on the Desktop.
+
+    Returns ``({}, "")`` when none of them has an entry.
     """
     try:
         import sleep_nwb_store as snwb
@@ -299,19 +360,24 @@ def load_sleep_channels(folder) -> dict:
                 inputs = snwb.read_sleep_inputs(nwb)
                 sc = inputs.get("sleep_channels")
                 if sc:
-                    return dict(sc)
+                    return dict(sc), os.path.basename(str(nwb))
             finally:
                 snwb.close_inputs(inputs)
     except Exception as exc:
         print(f"Warning: could not read sleep channels from the NWB: {exc}")
 
     f = find_output(folder, "sleep_channels.npy")
-    if f is None:
-        return {}
-    try:
-        return dict(np.load(f, allow_pickle=True).item())
-    except Exception:
-        return {}
+    if f is not None:
+        try:
+            return dict(np.load(f, allow_pickle=True).item()), os.path.basename(f)
+        except Exception:
+            pass
+
+    rat = rat_token(folder)
+    sc = sleep_channels_from_config(rat)
+    if sc:
+        return sc, f"hm_tracker_paths.txt (SLEEP_CHANNELS_{rat})"
+    return {}, ""
 
 
 def _nwb_lfp_info(nwb_path):

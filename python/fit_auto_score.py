@@ -204,7 +204,7 @@ def features_from_lfp_output(lfp_dir, fs=None, channel=None, sr_channel=None):
         fs = None if (fs and fs > LFP_FS_MAX) else fs
         fs = fs or 1500.0
     if channel is None or sr_channel is None:
-        sc = load_sleep_channels(lfp_dir)
+        sc, _ = load_sleep_channels(lfp_dir)
         channel = channel if channel is not None else sc.get("cortex")
         sr_channel = sr_channel if sr_channel is not None else sc.get("sr")
     if channel is None:
