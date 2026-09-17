@@ -155,6 +155,12 @@ al. (2016, *Neuron* 90:839–852). It labels each 1 s bin **WAKE / NREM / REM**
 from three metrics — all 0–1 normalised, each split at its bimodal-histogram dip
 (the paper's per-session bimodal cutoffs):
 
+Every cutoff is the paper's own bimodal-histogram dip, unscaled
+(`SW_THRESH_FACTOR` 1.0, the movement gate at the dip). A ×1.25 slow-wave
+multiplier and a 60th-percentile movement gate were fitted to one hand-scored
+session and did not carry over, so they are not the defaults; `--sw_factor`,
+`--th_factor` and `--emg_factor` set them per session.
+
 | Metric | How | Separates |
 |--------|-----|-----------|
 | broadband slow wave | delta (0.5–4 Hz) minus gamma (40–100 Hz) z-scored log power — the paper's PC1 axis (low freqs weighted opposite gamma) | NREM (high mode) |
@@ -204,6 +210,13 @@ StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 
 ## Fitting the auto-scorer to your own scoring
 
+> **Opt-in, and it did not transfer.** A model fitted to one hand-scored
+> session of one rat scored that session well (κ 0.82 held out) but did **not**
+> work on other recordings. The threshold scorer above, with the published
+> parameters, is the default; a fitted model is used only when you ask for it
+> (`--model auto`, or `--model <path>`). Treat what follows as a tool to try
+> once you have several sessions scored, not as the normal path.
+
 `fit_auto_score.py` replaces those hand-set cutoffs with boundaries *fitted* to
 sessions you scored yourself — a Gaussian model per state plus the transition
 matrix from your own hypnogram, decoded with Viterbi:
@@ -213,11 +226,35 @@ python fit_auto_score.py --lfp_folder /path/to/LFP_Output \
                          --labels /path/to/results/results_2026-09-17_you.npz
 ```
 
-It prints held-out agreement (5 contiguous time blocks — never shuffled bins,
-since neighbouring seconds are nearly identical) and writes
-`<prefix>sleep_score_model.npz` into the LFP folder. From then on
-`buzsaki_score.py` and the setup GUI use it automatically and the threshold
-multipliers no longer apply; delete the file to go back. Repeat
+It writes `<prefix>sleep_score_model.npz` into the LFP folder and prints two
+different numbers, which must not be confused:
+
+| Validation | What it answers | When it runs |
+|---|---|---|
+| **cross-session** (leave one session out) | can this score a rat it has never seen? | automatically, whenever ≥2 sessions are passed |
+| in-session (5 contiguous time blocks) | how well does it read the sessions it was fitted on? | always |
+
+**Only the first one tells you whether to use the model.** In-session CV shares
+the rat, the electrodes and the day's noise between train and test: the model
+fitted here scored κ 0.82 that way and then failed on other recordings. Once you
+have several sessions scored, fit them together and read the cross-session
+block; a held-out session below κ 0.6 prints a warning, and means stay on the
+threshold scorer.
+
+```bash
+python fit_auto_score.py --lfp_folder A --labels a.npz                          --lfp_folder B --labels b.npz                          --lfp_folder C --labels c.npz
+# Cross-session agreement (leave one session out) — the test of whether this transfers
+#   A   acc 0.89  kappa 0.78  | recall WAKE 0.88  NREM 0.93  REM 0.71
+#   ...
+```
+
+Sessions are stacked for fitting, but each one's features are z-scored within
+that session (so electrode gain cancels) and state transitions are counted only
+*within* a session — otherwise the join between two recordings is read as a
+state change the animal made, which taught the model an impossible REM→NREM
+transition. Nothing picks that file up
+by itself: pass `--model auto` (or the path) to score with it, and the threshold
+multipliers then no longer apply. Repeat
 `--lfp_folder`/`--labels` to fit several sessions at once, which is the better
 way to use it — one session teaches it that session's electrodes.
 

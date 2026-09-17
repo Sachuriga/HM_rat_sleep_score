@@ -243,11 +243,18 @@ def align_labels(states, label_ts, times):
 #  Model
 # ---------------------------------------------------------------------------- #
 def fit(X, y, codes=(WAKE, NREM, REM), shared_cov=True,
-        inter_bias=INTER_BIAS, inter_max_s=INTER_MAX_S):
+        inter_bias=INTER_BIAS, inter_max_s=INTER_MAX_S, sessions=None):
     """Fit Gaussian emissions + transition matrix for the states in ``codes``.
 
     ``inter_bias`` / ``inter_max_s`` are stored with the model and applied by
     :func:`predict`; they only matter when ``INTER`` is among ``codes``.
+
+    ``sessions`` labels each row with the recording it came from. Give it
+    whenever ``X`` stacks more than one session (or more than one block of
+    one): transitions are then counted only between rows of the same session,
+    so the join between two recordings is not read as a state change the animal
+    made. Without it, stacking a session that ends in REM onto one that starts
+    in NREM teaches the model a REM->NREM transition that never happened.
     """
     codes = tuple(codes)
     mus, covs, priors = [], [], []
@@ -265,8 +272,10 @@ def fit(X, y, codes=(WAKE, NREM, REM), shared_cov=True,
     k = len(codes)
     idx = {c: i for i, c in enumerate(codes)}
     counts = np.full((k, k), 1e-3)
-    for a, b in zip(y[:-1], y[1:]):
-        if a in idx and b in idx:
+    same = (np.ones(len(y) - 1, dtype=bool) if sessions is None else
+            np.asarray(sessions)[:-1] == np.asarray(sessions)[1:])
+    for a, b, ok in zip(y[:-1], y[1:], same):
+        if ok and a in idx and b in idx:
             counts[idx[a], idx[b]] += 1
     return {
         "codes": np.array(codes, dtype=int),
@@ -423,11 +432,17 @@ def epoch_detection(pred, truth, code=INTER):
     return found, len(man), extra, len(auto)
 
 
-def cross_validate(X, y, codes=(WAKE, NREM, REM), nfold=5, shared_cov=True):
+def cross_validate(X, y, codes=(WAKE, NREM, REM), nfold=5, shared_cov=True,
+                   sessions=None):
     """Time-blocked CV: fit on all but one contiguous block, test on it.
 
     Contiguous blocks, not shuffled bins — neighbouring seconds are nearly
     identical, so a shuffled split would score a memorised recording.
+
+    This measures how well the model reads *the sessions it was fitted on*. It
+    does not measure transfer to a new recording — for that use
+    :func:`cross_validate_sessions`, which is the test that matters: a model
+    that scored κ 0.82 this way still failed on other rats.
     """
     n = len(y)
     folds = np.array_split(np.arange(n), nfold)
@@ -435,8 +450,52 @@ def cross_validate(X, y, codes=(WAKE, NREM, REM), nfold=5, shared_cov=True):
     for f in folds:
         train = np.setdiff1d(np.arange(n), f)
         train = train[np.isin(y[train], list(codes))]
-        preds[f] = predict(fit(X[train], y[train], codes, shared_cov), X[f])
+        s = None if sessions is None else np.asarray(sessions)[train]
+        preds[f] = predict(fit(X[train], y[train], codes, shared_cov,
+                               sessions=s), X[f])
     return preds, agreement(preds, y, codes)
+
+
+def cross_validate_sessions(Xs, ys, codes=(WAKE, NREM, REM), shared_cov=True,
+                            min_secs=10.0, names=None, **fit_kw):
+    """Leave-one-session-out: fit on the other sessions, score the held-out one.
+
+    The honest test of whether a fitted model is usable at all. Time-blocked CV
+    within a session shares that session's electrodes, that rat's anatomy and
+    that day's noise between train and test, so it flatters a model badly: the
+    one fitted here reached κ 0.82 that way and did not work on other
+    recordings. Holding out a whole session is the only split that asks the
+    question you actually care about.
+
+    Returns ``(per_session, pooled)``. ``per_session`` is a list of dicts with
+    the session's name, its own agreement, and its predictions; ``pooled`` is
+    the agreement over every held-out bin at once. Needs at least 2 sessions.
+    """
+    if len(Xs) < 2:
+        raise ValueError("cross-session validation needs at least 2 sessions; "
+                         "with one, use cross_validate (and read it as "
+                         "in-session agreement, not transfer)")
+    names = list(names) if names is not None else [f"session {i+1}"
+                                                   for i in range(len(Xs))]
+    per_session, preds_all, truth_all = [], [], []
+    for i in range(len(Xs)):
+        others = [j for j in range(len(Xs)) if j != i]
+        Xtr = np.vstack([Xs[j] for j in others])
+        ytr = np.concatenate([ys[j] for j in others])
+        sess = np.concatenate([np.full(len(ys[j]), j) for j in others])
+        keep = np.isin(ytr, list(codes))
+        model = fit(Xtr[keep], ytr[keep], codes, shared_cov,
+                    sessions=sess[keep], **fit_kw)
+        pred = predict(model, Xs[i])
+        if min_secs:
+            pred = bz.enforce_min_duration(pred, min_secs=min_secs)
+        per_session.append({"name": names[i], "pred": pred,
+                            "agreement": agreement(pred, ys[i], codes),
+                            "n_train": int(keep.sum())})
+        preds_all.append(pred)
+        truth_all.append(ys[i])
+    pooled = agreement(np.concatenate(preds_all), np.concatenate(truth_all), codes)
+    return per_session, pooled
 
 
 def print_report(pred, y, codes, title, min_secs=10.0):
@@ -496,7 +555,13 @@ def main():
                     help="Longest intermediate epoch the decoder may produce (s).")
     ap.add_argument("--inter_bias", type=float, default=INTER_BIAS,
                     help="Penalty against calling intermediate (0 = none).")
-    ap.add_argument("--nfold", type=int, default=5, help="Time-blocked CV folds.")
+    ap.add_argument("--nfold", type=int, default=5,
+                    help="Time-blocked CV folds (in-session; 0 to skip).")
+    ap.add_argument("--no_cross_session", action="store_true",
+                    help="Skip leave-one-session-out validation (runs by default "
+                         "whenever more than one session is given).")
+    ap.add_argument("--min_secs", type=float, default=10.0,
+                    help="Minimum state-run duration applied before scoring (s).")
     args = ap.parse_args()
 
     if len(args.lfp_folder) != len(args.labels):
@@ -534,17 +599,45 @@ def main():
           f"{', '.join(STATE_NAMES[c] for c in codes)}  ({keep.sum()} bins)")
 
     fit_kw = dict(inter_bias=args.inter_bias, inter_max_s=args.inter_max_s)
-    if args.nfold > 1 and len(Xs) == 1:
-        n = len(y)
-        preds = np.zeros(n, dtype=int)
-        for f in np.array_split(np.arange(n), args.nfold):
-            train = np.setdiff1d(np.arange(n), f)
-            preds[f] = predict(fit(X[train], y[train], codes, **fit_kw), X[f])
-        print_report(preds, y, codes,
-                     f"Held-out agreement ({args.nfold} time-blocked folds)")
+    sess_all = np.concatenate([np.full(len(v), i) for i, v in enumerate(ys)])[keep]
 
-    model = fit(X, y, codes, **fit_kw)
-    print_report(predict(model, X), y, codes, "In-sample agreement (final model)")
+    if len(Xs) > 1 and not args.no_cross_session:
+        # The test that matters: can a model fitted on these rats score a rat it
+        # has never seen? Anything below the threshold scorer here means don't
+        # ship the model, whatever the in-session number says.
+        keeps = [np.isin(v, list(codes)) for v in ys]
+        per, pooled = cross_validate_sessions(
+            [Xi[k] for Xi, k in zip(Xs, keeps)],
+            [yi[k] for yi, k in zip(ys, keeps)],
+            codes, names=[Path(f).name for f in args.lfp_folder],
+            min_secs=args.min_secs, **fit_kw)
+        print("\nCross-session agreement (leave one session out) — the test of "
+              "whether this transfers")
+        for r in per:
+            a = r["agreement"]
+            rec = "  ".join(f"{STATE_NAMES[c]} {a['recall'][c]:.2f}" for c in codes)
+            print(f"  {r['name']:28s} acc {a['acc']:.3f}  kappa {a['kappa']:.3f}  "
+                  f"| recall {rec}")
+        ks = [r["agreement"]["kappa"] for r in per]
+        print(f"  pooled: acc {pooled['acc']:.3f}  kappa {pooled['kappa']:.3f}   "
+              f"(per-session kappa {min(ks):.3f}-{max(ks):.3f})")
+        if min(ks) < 0.6:
+            print("  WARNING: at least one held-out session scores kappa < 0.6 — "
+                  "this model does not transfer. Prefer the threshold scorer.")
+
+    if args.nfold > 1:
+        preds, _ = cross_validate(X, y, codes, nfold=args.nfold,
+                                  sessions=sess_all)
+        print_report(preds, y, codes,
+                     f"In-session agreement ({args.nfold} time-blocked folds)"
+                     + ("" if len(Xs) > 1 else
+                        " — shares electrodes with the training data, so read it "
+                        "as a ceiling, not as transfer"),
+                     min_secs=args.min_secs)
+
+    model = fit(X, y, codes, sessions=sess_all, **fit_kw)
+    print_report(predict(model, X), y, codes, "In-sample agreement (final model)",
+                 min_secs=args.min_secs)
 
     out = args.out
     if out is None:
@@ -552,8 +645,8 @@ def main():
         pfx = output_prefix(args.lfp_folder[0])
         out = str(Path(args.lfp_folder[0]) / f"{pfx}{DEFAULT_MODEL}")
     save_model(model, out)
-    print(f"\nSaved {out}\n  buzsaki_score picks this up automatically; "
-          f"delete it to fall back to the threshold scorer.")
+    print(f"\nSaved {out}\n  Nothing uses it by itself — score with it via "
+          f"`buzsaki_score.py --lfp_folder <dir> --model auto` (or a path).")
 
 
 if __name__ == "__main__":

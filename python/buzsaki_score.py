@@ -24,11 +24,12 @@ transitional/intermediate substates are folded into WAKE.
 
 States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 
-Two scorers live here. This threshold scorer needs no training and runs on any
-session. When a model fitted to hand-scored sessions is present (see
-``fit_auto_score.py``), ``score_from_lfp_output`` uses that instead — on our
-hand-scored session it agrees with the scorer 91% of the time (kappa 0.81)
-against 87% for these thresholds and 80% for the pre-tuning defaults.
+Two scorers live here, and **this threshold scorer is the default**: it needs
+no training and runs on any session. A model fitted to hand-scored sessions
+(see ``fit_auto_score.py``) reached kappa 0.82 on the session it was fitted to,
+but a model fitted to one session of one rat did not transfer to other
+recordings, so it is opt-in per folder (``model="auto"`` or a path) rather than
+picked up because a file happens to be there.
 
 The movement gate on REM prefers the EMG-from-LFP file, falling back to the
 LFP's own high-frequency power (``HF_BAND``) so sessions with neither an
@@ -58,14 +59,13 @@ WINDOW_S = 2.0              # spectrogram window (s)
 DT_S = 1.0                 # spectrogram step / bin size (s)
 SMOOTH_S = 15.0            # metric smoothing window (s)
 TH_THRESH_FACTOR = 0.85    # lower the theta threshold (<1) to accept more REM
-# The slow-wave histogram dip sits below the REM mode on our recordings, so the
-# automatic cutoff labels most REM as NREM; x1.25 is where held-out agreement
-# with the hand scoring peaks (every cross-validation fold picked 1.20-1.25).
-SW_THRESH_FACTOR = 1.25
-# REM needs the movement signal below this percentile of its own distribution.
-# A percentile, not the bimodal dip: the dip lands at very different places on
-# the EMG-from-LFP and high-frequency traces, this cutoff fits both.
-MOVE_GATE_PCT = 60.0
+# Every cutoff is the paper's own bimodal-histogram dip, unscaled. A x1.25
+# slow-wave multiplier and a 60th-percentile movement gate were fitted to one
+# hand-scored session here and did not carry over to other recordings, so the
+# defaults stay at the published behaviour; pass --sw_factor / --emg_factor (or
+# fit a model with fit_auto_score.py) to override per session.
+SW_THRESH_FACTOR = 1.0
+MOVE_GATE_PCT = None       # None = threshold at the bimodal dip, as published
 
 
 # ---------------------------------------------------------------------------- #
@@ -242,7 +242,8 @@ def cluster_states(sw, thratio, emg, motion=None, swthresh=None, ththresh=None,
     quiet = np.ones(n, dtype=bool)
     movt = None
     if movesigs:
-        thrs = [float(np.nanpercentile(s, MOVE_GATE_PCT)) * emg_factor
+        thrs = [(bimodal_threshold(s) if MOVE_GATE_PCT is None
+                 else float(np.nanpercentile(s, MOVE_GATE_PCT))) * emg_factor
                 if emgthresh is None else emgthresh for s in movesigs]
         for s, thv in zip(movesigs, thrs):
             quiet &= s < thv                  # REM needs EVERY signal quiescent
@@ -421,7 +422,7 @@ def _resolve_model(model, lfp_dir):
 
 
 def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
-                          sr_channel=None, fs=None, model="auto",
+                          sr_channel=None, fs=None, model=None,
                           use_motion=False, **kw):
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
@@ -431,9 +432,14 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
     (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
 
-    ``model`` selects the scorer: ``"auto"`` uses a model fitted to hand-scored
-    sessions when one is found in the folder (see ``fit_auto_score.py``), a path
-    or loaded model forces one, and ``None`` forces the threshold scorer.
+    ``model`` selects the scorer. The default ``None`` is the threshold scorer
+    above — the published parameters, nothing fitted. ``"auto"`` opts in to a
+    model fitted to hand-scored sessions if one is found in the folder (see
+    ``fit_auto_score.py``); a path or a loaded model forces a specific one.
+    A fitted model is deliberately *not* the default: one fitted to a single
+    session of one rat scored well on that session and did not transfer, so it
+    has to be asked for, per folder, rather than picked up because a file
+    happens to sit there.
 
     ``use_motion`` adds the accelerometer to the REM movement gate. Off by
     default: not every session records motion, so leaving it out keeps one
@@ -514,9 +520,17 @@ def main():
                     help=f"Output .npz (default: <lfp_folder>/{DEFAULT_OUT}).")
     ap.add_argument("--min_secs", type=float, default=10.0,
                     help="Minimum state-run duration (s).")
-    ap.add_argument("--model", default="auto",
-                    help="Fitted model to score with (default: use one found in "
-                         "the folder; 'none' forces the threshold scorer).")
+    ap.add_argument("--model", default="none",
+                    help="Fitted model to score with: a path, or 'auto' to use one "
+                         "found in the folder. Default 'none' = the threshold "
+                         "scorer with the published parameters.")
+    ap.add_argument("--sw_factor", type=float, default=SW_THRESH_FACTOR,
+                    help="Scale the slow-wave (NREM) cutoff; 1.0 = the bimodal dip, "
+                         ">1 = less NREM.")
+    ap.add_argument("--th_factor", type=float, default=TH_THRESH_FACTOR,
+                    help="Scale the theta (REM) cutoff; <1 = more REM.")
+    ap.add_argument("--emg_factor", type=float, default=1.0,
+                    help="Scale the movement ceiling on REM; >1 = laxer gate.")
     ap.add_argument("--use_motion", action="store_true",
                     help="Add the accelerometer to the REM movement gate.")
     args = ap.parse_args()
@@ -524,6 +538,9 @@ def main():
     res, ch = score_from_lfp_output(args.lfp_folder, channel=args.channel,
                                     min_secs=args.min_secs,
                                     model=None if args.model == "none" else args.model,
+                                    sw_factor=args.sw_factor,
+                                    th_factor=args.th_factor,
+                                    emg_factor=args.emg_factor,
                                     use_motion=args.use_motion)
     if args.out:
         out = args.out

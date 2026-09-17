@@ -728,7 +728,7 @@ class SetupGUI(QMainWindow):
                 return float(edit.text())
             except ValueError:
                 return default
-        kw = dict(sw_factor=_f(self.swf_edit, 1.0),
+        kw = dict(sw_factor=_f(self.swf_edit, bz.SW_THRESH_FACTOR),
                   th_factor=_f(self.thf_edit, bz.TH_THRESH_FACTOR),
                   emg_factor=_f(self.emgf_edit, 1.0),
                   min_secs=_f(self.minsec_edit, 10.0))
