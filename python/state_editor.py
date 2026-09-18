@@ -136,6 +136,7 @@ HELP_LINES = [
     ("- / =", "narrow / widen the LFP window"),
     ("0 / r", "reset the view to the whole recording"),
     ("u", "undo last state change"),
+    ("a", "copy the Auto scoring into the manual one (undoable)"),
     ("", ""),
     ("e", "toggle add-event mode; click to drop a mark"),
     ("d", "toggle delete-event mode; click near a mark"),
@@ -241,7 +242,8 @@ class StateEditor:
                  out_folder=".", states=None, chs=None, ch_labels=None,
                  auto_states=None, auto_states_ts=None,
                  auto_label="Auto", overlays=None,
-                 labeled_by=None, results_folder=None, nwb_path=None):
+                 labeled_by=None, results_folder=None, nwb_path=None,
+                 seed_from_auto=False):
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
@@ -273,6 +275,12 @@ class StateEditor:
         # --- optional auto-scored (Buzsáki) labels, shown in an extra panel ----
         self.auto_label = auto_label
         self.auto_states = self._align_auto_states(auto_states, auto_states_ts)
+
+        # Start the manual scoring FROM the auto-score, so the session is spent
+        # correcting it instead of re-drawing it. Only ever for a fresh scoring:
+        # a resumed one arrives in `states` and is never overwritten.
+        if states is None and seed_from_auto and self.auto_states is not None:
+            self.states = self._auto_as_manual()
 
         # --- display-ready spectrograms (bin freq, smooth time, log) --------
         self.spec_disp, self.fo = self._prepare_specs(specs, fos)
@@ -345,6 +353,37 @@ class StateEditor:
         when no anatomical name is known (the number is already in there)."""
         label = self.ch_labels[i]
         return label if label == f"Ch {self.chs[i]}" else f"{label} ({self.chs[i]})"
+
+    def _auto_as_manual(self):
+        """The auto-score turned into a manual starting point.
+
+        Bins the auto-scorer left unscored (0) become the default state rather
+        than gaps, so the hypnogram starts complete — every bin is then
+        something to accept or correct.
+        """
+        seed = sanitize_states(self.auto_states)
+        seed[seed == 0] = DEFAULT_STATE
+        return seed
+
+    def _copy_auto_to_manual(self):
+        """Replace the manual scoring with the auto-score (key ``a``).
+
+        One undo step, so ``u`` puts back whatever was there before.
+        """
+        if self.auto_states is None:
+            print("No auto-score to copy.")
+            return
+        before = self.states.copy()
+        self.states = self._auto_as_manual()
+        # same (indices, previous values) shape the scoring edits push, so `u`
+        # restores exactly the bins this changed
+        changed = np.flatnonzero(self.states != before)
+        if changed.size:
+            self.history.append((changed, before[changed]))
+        self._mark_dirty()
+        self._refresh_state_bar()
+        print(f"Copied the {self.auto_label} scoring into the manual one "
+              f"({self.n_bins} bins) — press u to undo.")
 
     def _align_auto_states(self, auto_states, auto_states_ts):
         """Resample provided auto-labels onto this session's 1 s bins (nearest)."""
@@ -1236,6 +1275,8 @@ class StateEditor:
             self.fig.canvas.draw_idle()
         elif k in ("-", "="):
             self._change_eeg_width(k)
+        elif k == "a":
+            self._copy_auto_to_manual()
         elif k == "u":
             self._undo()
         elif k == "s":

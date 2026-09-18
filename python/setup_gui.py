@@ -367,6 +367,15 @@ class SetupGUI(QMainWindow):
         self.buzsaki_chk.toggled.connect(self._toggle_thresholds)
         box3.addWidget(self.buzsaki_chk)
 
+        self.seed_auto_chk = QCheckBox("Start the manual scoring from the auto-score")
+        self.seed_auto_chk.setChecked(True)
+        self.seed_auto_chk.setToolTip(
+            "Pre-fill the manual scoring with the auto-score, so you correct it "
+            "instead of drawing it from scratch.\n"
+            "Ignored when you resume an existing scoring from the dropdown. In "
+            "the editor, 'a' copies the auto-score across at any time (undo with 'u').")
+        box3.addWidget(self.seed_auto_chk)
+
         import buzsaki_score as _bz
         self.thr_grid = QGridLayout()
         self.thr_grid.setHorizontalSpacing(12)
@@ -451,6 +460,7 @@ class SetupGUI(QMainWindow):
         for e in (self.swf_edit, self.thf_edit, self.emgf_edit,
                   self.minsec_edit):
             e.setEnabled(on)
+        self.seed_auto_chk.setEnabled(on)   # nothing to seed from without it
 
     def _update_ready(self):
         """Enable Launch only when the three required paths are set."""
@@ -810,6 +820,7 @@ class SetupGUI(QMainWindow):
                              auto_states=auto_states, auto_states_ts=auto_ts,
                              overlays=overlays, states=states,
                              labeled_by=labeled_by, nwb_path=self.nwb_path,
+                             seed_from_auto=self.seed_auto_chk.isChecked(),
                              results_folder=os.path.join(self.lfp_folder, "results"))
         self.hide()
         editor.show()
