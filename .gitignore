@@ -35,3 +35,6 @@ test.ipynb
 *.temp
 *.swp
 *.bak
+
+# Claude Code (agent config, permissions and session state — machine-local)
+.claude/
