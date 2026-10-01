@@ -106,7 +106,9 @@ keyboard/mouse controls.
 
 - **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `3`
   NREM, `4` intermediate, `5` REM, `2` erase); click again / press `c` to
-  un-arm.
+  un-arm. A large badge at the toolbar's left, filled in the state's colour,
+  always shows what you are labelling — and, after the first `Space`, where
+  the epoch started.
 - **Score an epoch**: with a state armed, press `Space` at one end of the span
   and again at the other — in either order, so marking 13 min and then 11 min
   labels 11–13 min — to label it (minimum 10 s). Clicking never scores.

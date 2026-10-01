@@ -572,9 +572,11 @@ class StateEditor:
         states_tb.setStyleSheet(_TB_STYLE + "QToolBar{spacing:6px;}")
         self.win.addToolBarBreak()
         self.win.addToolBar(states_tb)
-        arm_lbl = _QLabel("  Arm state: ")
-        arm_lbl.setStyleSheet("color:#55555A; font-size:12px; font-weight:600;")
-        states_tb.addWidget(arm_lbl)
+        # what a Space press does right now, in the armed state's colour
+        self.arm_badge = _QLabel("")
+        self.arm_badge.setMinimumWidth(330)
+        states_tb.addWidget(self.arm_badge)
+        states_tb.addSeparator()
         labels = {0: "erase", 1: "awake", 3: "NREM", 5: "REM",
                   4: "interm"}
         self._state_btns = {}
@@ -589,7 +591,9 @@ class StateEditor:
                 f"QPushButton{{background:rgb({r},{g},{b}); color:{fg};"
                 f" border:1px solid rgba(0,0,0,0.12); border-radius:8px;"
                 f" padding:6px 13px; font-size:12px;}}"
-                f"QPushButton:checked{{border:2.5px solid #007AFF; font-weight:700;}}")
+                # checked: a thick dark ring; the padding gives back the 2 px
+                # the border takes, and the weight stays, so the label never clips
+                f"QPushButton:checked{{border:3px solid #1D1D1F; padding:4px 11px;}}")
             btn.clicked.connect(lambda _checked, st=s: self._arm_state_toggle(st))
             states_tb.addWidget(btn)
             self._state_btns[s] = btn
@@ -618,6 +622,47 @@ class StateEditor:
             return
         for s, btn in self._state_btns.items():
             btn.setChecked(self.current_state == s)
+
+    def _update_badge(self):
+        """Fill the badge at the toolbar's left with what is being labelled.
+
+        The armed state used to show only as a thin border on its button, easy
+        to lose track of while scoring. The badge takes the state's colour and
+        names it; after the first Space it also gives the start time, so a
+        half-marked epoch is never forgotten."""
+        if not hasattr(self, "arm_badge"):
+            return
+        s = self.current_state
+        if s is None and self.event_mode:
+            verb = "ADD" if self.event_mode == "add" else "DELETE"
+            how = "click to place" if self.event_mode == "add" else "click near a mark"
+            bg, fg, border = "#F7D6F2", "#5A1050", "#C040B0"
+            text = (f"<b style='font-size:16px'>{verb} EVENT {self.event_num}</b>"
+                    f"&nbsp;&nbsp;<span style='font-size:12px'>{how}</span>")
+        elif s is None:
+            bg, fg, border = "#ECECF0", "#6E6E73", "#D1D1D6"
+            text = ("<span style='font-size:13px'>Not labelling — "
+                    "press 1–5 to pick a state</span>")
+        else:
+            if s == 0:
+                bg, fg, border = "#FFFFFF", "#1D1D1F", "#8A8F98"
+                what = "ERASING"
+            else:
+                r, g, b = (STATE_COLORS[s] * 255).astype(int)
+                bg = f"rgb({r},{g},{b})"
+                fg = "#FFFFFF" if (0.299 * r + 0.587 * g + 0.114 * b) < 140 else "#111111"
+                border = bg
+                what = STATE_NAMES[s].upper()
+            if self.pending_bound is None:
+                step = "Space at one end"
+            else:
+                step = f"from {_fmt_hms(self.pending_bound)} — Space at the other end"
+            text = (f"<b style='font-size:17px'>●&nbsp;{what}</b>"
+                    f"&nbsp;&nbsp;<span style='font-size:12px'>{step}</span>")
+        self.arm_badge.setText(text)
+        self.arm_badge.setStyleSheet(
+            f"QLabel{{background:{bg}; color:{fg}; border:2px solid {border};"
+            f" border-radius:9px; padding:4px 14px; margin:0 4px;}}")
 
     def _set_window_title(self, text):
         if getattr(self, "win", None) is not None:
@@ -1058,18 +1103,11 @@ class StateEditor:
             return
         scored, total = self._coverage()
         pct = 100.0 * scored / total if total else 0.0
-        if self.current_state is not None:
-            armed = (f"{STATE_TO_KEY[self.current_state]} "
-                     f"{STATE_NAMES[self.current_state]}")
-        elif self.event_mode:
-            armed = f"{self.event_mode} ev{self.event_num}"
-        else:
-            armed = "—"
         counts = "   ".join(
             f"{lab} {int(np.count_nonzero(self.states == s))}"
             for s, lab in ((1, "W"), (3, "N"), (4, "I"), (5, "R")))
         self.stats_lbl.setText(
-            f"armed: {armed}      scored {pct:.1f}%      {counts}      "
+            f"scored {pct:.1f}%      {counts}      "
             f"{len(self.events)} ev")
 
     def _toggle_help(self):
@@ -1181,6 +1219,7 @@ class StateEditor:
                if getattr(self, "results_path", None) else "")
         self._set_window_title(f"States: {self.base_name}{src}{extra}")
         self._sync_state_buttons()
+        self._update_badge()
         self._update_match()
         self._update_statusbar()
         if hasattr(self, "stats_lbl"):
@@ -1350,6 +1389,7 @@ class StateEditor:
             self._apply_state(self.pending_bound, self.cursor_time, self.current_state)
             self.pending_bound = None
             self._clear_pending_line()
+        self._update_badge()
 
     def _on_key(self, event):
         k = event.key
