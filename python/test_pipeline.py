@@ -99,7 +99,7 @@ assert st.tolist() == [bz.NREM, bz.NREM, bz.REM, bz.WAKE, bz.WAKE, bz.NREM]
 # legacy light/drowsy (2) -> awake; intermediate (4) is scored, so it survives
 from state_editor import sanitize_states, KEY_TO_STATE
 assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 4, 5]
-assert KEY_TO_STATE == {"1": 1, "2": 3, "3": 5, "4": 4, "5": 0}   # 0 = reset view
+assert KEY_TO_STATE == {"1": 1, "2": 0, "3": 3, "4": 4, "5": 5}   # key = code; 2 erases
 print("Buzsáki 3-state clustering + legacy-code mapping ok")
 
 # Resuming a scored file: the scorer name comes from the file (no prompt) and
@@ -242,9 +242,10 @@ ed4._on_key(_Ev(key="0"))
 lo, hi = ed4._xlim_get()
 assert abs((hi - lo) - full) < 1e-6, "key 0 did not reset the view"
 assert ed4.current_state is None, "key 0 must not arm a state"
-ed4._on_key(_Ev(key="5"))
-assert ed4.current_state == 0, "key 5 should arm erase"
+for key, code in (("1", 1), ("2", 0), ("3", 3), ("4", 4), ("5", 5)):
+    ed4._on_key(_Ev(key=key))
+    assert ed4.current_state == code, f"key {key} armed {ed4.current_state}, not {code}"
 ed4._on_key(_Ev(key="c"))
-print("key 0 = reset view, key 5 = erase")
+print("key 0 = reset view; keys 1/3/4/5 = their codes, 2 = erase")
 
 print("\nALL CHECKS PASSED")

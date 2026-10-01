@@ -8,18 +8,18 @@ Sleep states:
 
 | Code | State | Key |
 |------|-------|-----|
-| 0 | No state | `0` |
+| 0 | No state (erase) | `2` |
 | 1 | Awake | `1` |
-| 3 | NREM | `2` |
-| 5 | REM | `3` |
+| 3 | NREM | `3` |
 | 4 | Intermediate | `4` |
+| 5 | REM | `5` |
 
 The three states of Watson et al. (2016, *Neuron*) plus **intermediate** sleep,
-the NREM→REM transition. Keys are sequential (`1`–`4`) while the stored codes
-stay 1/3/4/5, so files remain MATLAB-compatible. The legacy code 2
-(light/drowsy) is not scored — that paper folds drowsy periods and
-microarousals into WAKE — and old files containing it are mapped on load
-(2 → awake).
+the NREM→REM transition. As in the original MATLAB `TheStateEditor`, each key is
+its own state code, so files remain MATLAB-compatible — except `2`: the legacy
+light/drowsy code is no longer scored (that paper folds drowsy periods and
+microarousals into WAKE), so key `2` now **erases**, and old files containing
+code 2 are mapped on load (2 → awake). `0` resets the view.
 
 The state editor is a Python reimplementation of `TheStateEditor` (originally by
 Dr. Andres Grosmark and Dr. Abdel Rayan), modified and generalised by Sachuriga.
@@ -104,8 +104,8 @@ keyboard/mouse controls.
 
 ### Scoring in the editor
 
-- **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `2`
-  NREM, `3` REM, `4` intermediate, `5` erase); click again / press `c` to
+- **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `3`
+  NREM, `4` intermediate, `5` REM, `2` erase); click again / press `c` to
   un-arm.
 - **Score an epoch**: with a state armed, press `Space` at the start and again
   at the end to label that span (minimum 10 s). Clicking never scores.

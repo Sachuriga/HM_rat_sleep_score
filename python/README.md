@@ -6,18 +6,18 @@ whitened multitaper spectrograms, and score sleep states by hand.
 
 | Code | State | Key |
 |------|-------|-----|
-| 0 | No state | `0` |
+| 0 | No state (erase) | `2` |
 | 1 | Awake | `1` |
-| 3 | NREM | `2` |
-| 5 | REM | `3` |
+| 3 | NREM | `3` |
 | 4 | Intermediate | `4` |
+| 5 | REM | `5` |
 
 The three states of Watson et al. (2016, *Neuron*) plus **intermediate** sleep,
-the NREM→REM transition. Keys are sequential (`1`–`4`) while the stored codes
-stay 1/3/4/5, so files remain MATLAB-compatible. The legacy code 2
-(light/drowsy) is not scored — that paper folds drowsy periods and
-microarousals into WAKE — and old files containing it are mapped on load
-(2 → awake).
+the NREM→REM transition. As in the original MATLAB `TheStateEditor`, each key is
+its own state code, so files remain MATLAB-compatible — except `2`: the legacy
+light/drowsy code is no longer scored (that paper folds drowsy periods and
+microarousals into WAKE), so key `2` now **erases**, and old files containing
+code 2 are mapped on load (2 → awake). `0` resets the view.
 
 ## Requirements
 
@@ -84,7 +84,7 @@ channels or the sampling rate).
 
 | Key | Action |
 |-----|--------|
-| `1`–`4` (awake/NREM/REM/intermediate, `5` = erase) | Arm a state, then mark the two time bounds with `Space` `Space` |
+| `1` `3` `4` `5` (awake/NREM/intermediate/REM, `2` = erase) | Arm a state, then mark the two time bounds with `Space` `Space` |
 | `c` | Cancel the current state action |
 | Left / Right | Step the time cursor; the view scrolls to keep it centred |
 | Shift + Left / Right | Pan by a whole window |

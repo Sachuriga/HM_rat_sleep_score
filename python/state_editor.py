@@ -2,8 +2,8 @@
 
 Displays, for up to three LFP channels, a whitened multitaper spectrogram, a
 motion/EMG trace and the raw LFP, plus a colour-coded state bar.  States are
-scored at 1 s resolution by arming a state (keys 1-4: awake/NREM/REM/
-intermediate, 0 = erase) and marking the two time bounds.  The time cursor is
+scored at 1 s resolution by arming a state (key = state code: 1 awake,
+3 NREM, 4 intermediate, 5 REM; 2 = erase) and marking the two time bounds.  The time cursor is
 a fixed playhead held at the middle of the view; the spectrograms scroll past
 it, and a panel can be dragged to pan as the Position slider does.  Work is saved to a MATLAB-compatible ``<base>-states.mat`` file so it
 interoperates with the original MATLAB toolkit.
@@ -65,10 +65,10 @@ STATE_COLORS = {
 STATE_NAMES = {0: "none", 1: "awake", 3: "NREM", 4: "intermediate", 5: "REM"}
 DEFAULT_STATE = 3     # every bin starts as NREM; scoring re-labels the rest
 STATE_TICKS = ([1, 3, 4, 5], ["W", "N", "I", "R"])   # hypnogram y-axis
-# keyboard -> state code: sequential keys 1-4 (erase on 5), decoupled from the
-# stored HM codes (1/3/4/5) so the .mat files stay MATLAB-compatible.
-# 0 is not a state key — it resets the view to the whole recording.
-KEY_TO_STATE = {"1": 1, "2": 3, "3": 5, "4": 4, "5": 0}
+# keyboard -> state code. As in the original TheStateEditor, each key is its
+# own state code — except 2: that was light/drowsy, which is no longer scored,
+# so key 2 now erases (code 0). 0 is not a state key — it resets the view.
+KEY_TO_STATE = {"1": 1, "2": 0, "3": 3, "4": 4, "5": 5}
 STATE_TO_KEY = {v: k for k, v in KEY_TO_STATE.items()}
 
 
@@ -122,10 +122,10 @@ _SLIDER_STYLE = (
     "QSlider::handle:horizontal:hover{border:1px solid #A9A9AF;}")
 
 HELP_LINES = [
-    ("1-4", "arm awake/NREM/REM/intermediate (then Space Space to score)"),
+    ("1 3 4 5", "arm awake / NREM / intermediate / REM (then Space Space)"),
     ("← →", "move the time cursor (1 s per press)"),
     ("Space", "confirm epoch bound (1st = start, 2nd = apply)"),
-    ("5", "arm 'no state' (erase)"),
+    ("2", "arm 'no state' (erase)"),
     ("c", "cancel the armed state"),
     ("click", "move the cursor here — it re-centres (never scores)"),
     ("drag", "pan the window (on a raw LFP trace: scrub finely)"),
@@ -551,7 +551,7 @@ class StateEditor:
         labels = {0: "erase", 1: "awake", 3: "NREM", 5: "REM",
                   4: "interm"}
         self._state_btns = {}
-        for s in (1, 3, 5, 4, 0):
+        for s in (1, 0, 3, 4, 5):          # key order 1-5
             r, g, b = (STATE_COLORS[s] * 255).astype(int)
             fg = "#ffffff" if (0.299 * r + 0.587 * g + 0.114 * b) < 140 else "#111111"
             key = STATE_TO_KEY[s]
