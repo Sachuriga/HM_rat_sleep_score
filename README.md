@@ -107,8 +107,9 @@ keyboard/mouse controls.
 - **Arm a state** with the coloured toolbar buttons (or keys `1` awake, `3`
   NREM, `4` intermediate, `5` REM, `2` erase); click again / press `c` to
   un-arm.
-- **Score an epoch**: with a state armed, press `Space` at the start and again
-  at the end to label that span (minimum 10 s). Clicking never scores.
+- **Score an epoch**: with a state armed, press `Space` at one end of the span
+  and again at the other — in either order, so marking 13 min and then 11 min
+  labels 11–13 min — to label it (minimum 10 s). Clicking never scores.
 - **No stranded scraps**: scoring inside an existing epoch can leave a sliver
   of the old label behind. Any run left **shorter than 5 s** is relabelled to
   match whichever adjacent epoch lasts longer (the earlier one if they tie), so

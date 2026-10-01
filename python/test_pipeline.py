@@ -248,4 +248,61 @@ for key, code in (("1", 1), ("2", 0), ("3", 3), ("4", 4), ("5", 5)):
 ed4._on_key(_Ev(key="c"))
 print("key 0 = reset view; keys 1/3/4/5 = their codes, 2 = erase")
 
+# Scoring works in either order: marking 80 s first and 50 s second labels 50-80 s
+ed5 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+ed5._apply_state(80, 50, 5)
+assert (ed5.states[50:81] == 5).all(), "a bound placed before the first one was ignored"
+ed5.cursor_time = 30.0; ed5.current_state = 1
+ed5._confirm_boundary(); ed5.cursor_time = 15.0; ed5._confirm_boundary()   # Space at 30, then 15
+assert (ed5.states[15:31] == 1).all(), "Space-Space backwards did not label"
+print("reversed scoring ok")
+
+# M4 keeps first/last/min/max of every pixel column, in time order
+from state_editor import m4_indices
+yy = np.random.default_rng(3).standard_normal(1003)
+ix = m4_indices(yy, 10)
+assert (np.diff(ix) >= 0).all(), "M4 indices out of time order"
+for j in range(100):                                  # every full block
+    blk = slice(j * 10, j * 10 + 10)
+    for want in (j * 10, j * 10 + 9, j * 10 + int(np.argmin(yy[blk])), j * 10 + int(np.argmax(yy[blk]))):
+        assert want in ix, f"block {j} lost index {want}"
+assert set(range(1000, 1003)) <= set(ix.tolist()), "partial last block dropped"
+assert ix.size <= 4 * 100 + 3
+assert (m4_indices(yy, 3) == np.arange(yy.size)).all()   # < 4 per pixel: keep all
+print("M4 decimation ok")
+
+# Spectrograms receive only the visible stretch, block-averaged to screen width
+n_big = 6000
+fo_big = np.linspace(0, 100, 50)
+big = [np.exp(np.random.default_rng(i).standard_normal((fo_big.size, n_big))) for i in range(3)]
+to_big = np.arange(n_big) + 0.5
+ed6 = StateEditor("test", big, [fo_big] * 3, to_big, np.zeros(n_big),
+                  [np.zeros(n_big * 40)] * 3, 40.0, out_folder="/tmp")
+img, disp = ed6.spec_imgs[0], ed6.spec_disp[0]
+ed6.cursor_time = 3000.0; ed6._zoom_to(200)           # zoomed in: one column per bin
+lo, hi = ed6._xlim_get()
+x0, x1 = img.get_extent()[:2]
+assert x0 <= lo and x1 >= hi, f"image {x0:.0f}-{x1:.0f} does not cover view {lo:.0f}-{hi:.0f}"
+a, m, k, nrows = ed6._spec_key
+assert k == 1 and np.allclose(img.get_array(), disp[:nrows, a:a + m]), "visible slice wrong"
+assert img.get_array().shape[1] < 400, "zoomed in, yet the whole recording was handed over"
+ed6._zoom_to(n_big)                                   # whole recording: block means
+a, m, k, nrows = ed6._spec_key
+assert k > 1, "6000 bins should exceed the panel's pixels"
+want = disp[:nrows, a:a + k].mean(axis=1)
+assert np.allclose(img.get_array()[:, 0], want), "first block is not the mean of its columns"
+print(f"spectrogram slicing ok (whole view: {k} bins per column)")
+
+# The motion band shows an isolated above-threshold bin, a full bin wide
+lane = ed5._lanes[0]
+lane["on"][:] = False; lane["on"][60] = True
+ed5._lane_key = None; ed5._zoom_to(40); ed5.cursor_time = 60.0; ed5._centre_view()
+ed5._lane_key = None; ed5._refresh_motion_lanes()
+band = lane["band"].get_array(); ext = lane["band"].get_extent()
+cols = band.shape[1]; colw = (ext[1] - ext[0]) / cols
+lit = [ext[0] + (j + 0.5) * colw for j in range(cols) if band[0, j, 3] > 0]
+assert len(lit) == 1 and abs(lit[0] - ed5.to[60]) < 1e-6, f"isolated bin not drawn at its time: {lit}"
+assert abs(colw - ed5._dt) < 1e-9, "band bins should be one bin wide"
+print("motion band shows isolated bins ok")
+
 print("\nALL CHECKS PASSED")

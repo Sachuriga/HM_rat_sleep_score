@@ -31,6 +31,8 @@ import re
 
 import numpy as np
 import matplotlib
+from matplotlib.collections import LineCollection
+from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 from scipy.io import loadmat, savemat
@@ -190,6 +192,31 @@ def absorb_short_runs(states, min_bins):
                  if r is not None]
         s[a:b] = max(sides, key=lambda r: r[1] - r[0])[2]       # ties -> earlier
     return s
+
+
+def m4_indices(y, k):
+    """Indices that draw ``y`` exactly as all of it would draw, ``k`` per pixel.
+
+    M4 aggregation (Jugel et al. 2014, VLDB): within each block of ``k``
+    samples — one screen pixel column — keep the first, last, minimum and
+    maximum, in their original time order. A line through those points
+    rasterizes the same as a line through every sample, so a zoomed-out trace
+    costs ~4 points per pixel whatever the recording length. A final partial
+    block is kept whole. NaNs are skipped when picking the extremes.
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    full = (n // k) * k
+    if k < 4 or full == 0:                  # nothing to gain
+        return np.arange(n)
+    blocks = y[:full].reshape(-1, k)
+    nan = np.isnan(blocks)
+    imin = np.argmin(np.where(nan, np.inf, blocks), axis=1)
+    imax = np.argmax(np.where(nan, -np.inf, blocks), axis=1)
+    nb = blocks.shape[0]
+    idx = np.stack([np.zeros(nb, int), imin, imax, np.full(nb, k - 1)], axis=1)
+    idx = np.sort(idx, axis=1) + (np.arange(nb) * k)[:, None]   # time order
+    return np.concatenate([idx.ravel(), np.arange(full, n)])
 
 
 def _labeled_by_of(data, path):
@@ -650,7 +677,7 @@ class StateEditor:
             img = ax.imshow(
                 self.spec_disp[i][mask, :], origin="lower", aspect="auto",
                 extent=[self.to[0], self.to[-1], self.fo[mask][0], self.fo[mask][-1]],
-                cmap=cmap)
+                cmap=cmap)          # receives visible slices: _refresh_spec_images
             self.spec_imgs.append(img)
             ax.set_ylabel(f"{self._panel_title(i)}\nFreq (Hz)")
             ax.set_xlim(self.lims)
@@ -664,9 +691,13 @@ class StateEditor:
 
         # remember the auto colour limits, display band and cmap for the toolbar
         # controls (frequency-band / contrast sliders + colormap picker).
+        # (clim comes from the full image above, so colours stay fixed while the
+        # images below are swapped for visible slices)
         self._spec_clim0 = [img.get_clim() for img in self.spec_imgs]
         self._fmax = MAX_FREQ
         self._contrast = 1.0
+        self._spec_key = None
+        self._refresh_spec_images()
 
         # Motion / EMG / theta-delta as stacked "ridgeline" lanes, each thresholded at
         # its bimodal-histogram dip and shown as a bold 1/0 band — filled above
@@ -682,6 +713,7 @@ class StateEditor:
         traces = [("Motion", self.motion)] + list(self.overlays)
         yticks = []
         self.motion_thresholds = {}
+        self._lanes, self._lane_key = [], None     # filled per view, see _refresh_motion_lanes
         for i, (label, a) in enumerate(traces):
             color = MOTION_PALETTE[i % len(MOTION_PALETTE)]
             base = float(i)
@@ -704,13 +736,18 @@ class StateEditor:
             on = metric > thr
             thr_y = base + float(np.clip((thr - lo) / span_i, 0.0, 1.0)) * 0.88
             self.ax_motion.axhline(base, color="#e2e5e9", lw=0.5, zorder=1)
-            # 1/0 band: lightly filled where the signal is above its threshold
-            self.ax_motion.fill_between(self.to, base, base + 0.88, where=on,
-                                        step="mid", color=color, alpha=0.3,
-                                        linewidth=0, zorder=2)
-            # continuous trace + dotted threshold line for reference
-            self.ax_motion.plot(self.to, base + norm, color=color, lw=0.6,
-                                alpha=0.55, zorder=3)
+            # 1/0 band (lightly filled where the signal is above its threshold) and
+            # the continuous trace: both receive only their visible stretch,
+            # from _refresh_motion_lanes
+            band = self.ax_motion.imshow(np.zeros((1, 1, 4)), aspect="auto",
+                                         zorder=2, extent=[self.to[0], self.to[-1],
+                                                 base, base + 0.88])
+            (trace,) = self.ax_motion.plot([], [], color=color, lw=0.6,
+                                           alpha=0.55, zorder=3)
+            self._lanes.append({"y": base + norm, "on": on, "band": band,
+                                "trace": trace, "rgba": to_rgba(color, 0.3),
+                                "base": base})
+            # dotted threshold line for reference
             self.ax_motion.axhline(thr_y, color=color, ls=":", lw=0.7, alpha=0.9,
                                    zorder=4)
             yticks.append(base + 0.44)
@@ -723,6 +760,7 @@ class StateEditor:
         self.ax_motion.tick_params(axis="y", length=0)
         self.ax_motion.set_xlim(self.lims)
         self.ax_motion.set_xticklabels([])
+        self._refresh_motion_lanes()
         self.cursor_lines.append(self.ax_motion.axvline(mid, color="k", ls="--", lw=0.8))
 
         self.eeg_lines, self.eeg_cursor, self.eeg_yabs = [], [], []
@@ -852,11 +890,96 @@ class StateEditor:
             return
         self._fmax = float(fmax)
         ylo, yhi = float(self.fo[mask][0]), float(self.fo[mask][-1])
-        for i, img in enumerate(self.spec_imgs):
-            img.set_data(self.spec_disp[i][mask, :])
-            img.set_extent([self.to[0], self.to[-1], ylo, yhi])
-            self.ax_spec[i].set_ylim(ylo, yhi)
+        self._refresh_spec_images()
+        for ax in self.ax_spec:
+            ax.set_ylim(ylo, yhi)
         self.fig.canvas.draw_idle()
+
+    def _refresh_visible(self, *_):
+        """Re-slice everything that is drawn per visible stretch."""
+        self._refresh_spec_images()
+        self._refresh_motion_lanes()
+
+    def _refresh_motion_lanes(self):
+        """Hand the motion lanes only their visible stretch (the reasoning of
+        ``_refresh_spec_images``): drawn whole, they made every frame's cost grow
+        with the length of the recording. Zoomed out, the trace keeps only the
+        M4 points of each pixel column (``m4_indices``), which draw exactly as
+        the full trace would — an 8 h overview went from 43 ms to a few. The
+        band's default interpolation averages bins when zoomed out, so its
+        density stays true.
+
+        Each above-threshold bin is drawn a full bin wide, centred on its
+        timestamp. The fill_between this replaces drew a run from its first to
+        its last bin centre, so it lost half a bin at each end and never showed
+        an isolated one-second bin at all."""
+        if not self._lanes:
+            return
+        lo, hi = self._xlim_get()
+        t, dt = self.to, self._dt
+        px = max(64, int(self.ax_motion.get_window_extent().width))
+        a = max(0, int(np.searchsorted(t, lo, "left")) - 2)
+        b = min(t.size, int(np.searchsorted(t, hi, "right")) + 2)
+        k = max(1, (b - a) // px)                    # samples per pixel column
+        a -= a % k                                   # fixed grid: no shimmer
+        if (a, b, k) == self._lane_key:
+            return
+        self._lane_key = (a, b, k)
+        for lane in self._lanes:
+            y = lane["y"][a:b]
+            keep = m4_indices(y, k)
+            lane["trace"].set_data(t[a:b][keep], y[keep])
+            rgba = np.zeros((1, b - a, 4))
+            rgba[0, lane["on"][a:b]] = lane["rgba"]
+            lane["band"].set_data(rgba)
+            lane["band"].set_extent([t[a] - dt / 2, t[b - 1] + dt / 2,
+                                     lane["base"], lane["base"] + 0.88])
+
+    def _refresh_spec_images(self, *_):
+        """Hand each spectrogram image only what the screen can show.
+
+        imshow used to get the whole recording every frame and antialias it
+        down: on an 8 h session that alone cost ~140 ms a frame zoomed out, and
+        dragging stuttered. Each redraw now slices out the visible columns and,
+        when there are more columns than pixels, block-averages them to screen
+        resolution. The average is itself an antialiasing box filter, so brief
+        events still show at overview zoom rather than being skipped as plain
+        nearest-neighbour sampling would skip them. The images keep matplotlib's
+        default "antialiased" interpolation — the frequency axis is upsampled
+        only ~1.3x, where "nearest" draws uneven 1- and 2-pixel rows — and on a
+        screen-sized slice that costs ~5 ms, not the ~100 ms of filtering the
+        whole recording. Blocks sit on a fixed grid so the image does not
+        shimmer while panning, and an unchanged view is not recomputed."""
+        lo, hi = self._xlim_get()
+        n_cols = self.spec_disp[0].shape[1]
+        t0 = float(self.to[0])
+        w = (float(self.to[-1]) - t0) / n_cols       # s per column, as imshow maps it
+        px = max(64, int(self.ax_spec[0].get_window_extent().width))
+        a = max(0, int(np.floor((lo - t0) / w)))
+        b = min(n_cols, int(np.ceil((hi - t0) / w)))
+        k = max(1, (b - a) // px)                    # source columns per pixel
+        a = max(0, a - 2 * k)                        # context for the smoothing
+        b = min(n_cols, b + 2 * k)                   # filter at the view's edges
+        a -= a % k                                   # fixed block grid
+        m = -(-(b - a) // k)                         # display columns (ceil)
+        nrows = max(2, int(np.count_nonzero(self.fo <= self._fmax)))
+        key = (a, m, k, nrows)
+        if key == self._spec_key:
+            return
+        self._spec_key = key
+        ylo, yhi = float(self.fo[0]), float(self.fo[nrows - 1])
+        end = min(n_cols, a + m * k)
+        for i, img in enumerate(self.spec_imgs):
+            part = self.spec_disp[i][:nrows, a:end]
+            if k > 1:
+                full = (part.shape[1] // k) * k
+                blocks = part[:, :full].reshape(nrows, -1, k).mean(axis=2)
+                if full < part.shape[1]:             # last, partial block
+                    blocks = np.hstack([blocks, part[:, full:].mean(axis=1, keepdims=True)])
+                part = blocks
+            img.set_data(part)
+            # a partial last block only overhangs past the recording's end
+            img.set_extent([t0 + a * w, t0 + (a + m * k) * w, ylo, yhi])
 
     def _on_contrast(self, k):
         """Colormap 'depth': compress/expand the colour limits about their centre
@@ -995,17 +1118,25 @@ class StateEditor:
         state levels, with each horizontal run drawn in its state colour and
         unscored (0) bins left as gaps.
         """
-        y = np.asarray(states, dtype=float).copy()
-        y[y == 0] = np.nan                              # unscored -> gap
+        # Built from run boundaries, as two artists in total: an hlines artist
+        # per run, plus a per-bin step line, made this bar cost grow with the
+        # length of the recording on every frame.
         t = np.asarray(self.to, dtype=float)
-        # grey staircase outline (the vertical transitions between levels)
-        ax.step(t, y, where="post", color="0.55", lw=0.8, zorder=1)
-        # coloured horizontal segment per contiguous run
+        xs, ys, segs, cols = [], [], [], []
         for s, e, v in self._state_runs(states):
-            if v == 0:
-                continue
-            x1 = t[e] if e < t.size else t[-1]
-            ax.hlines(v, t[s], x1, color=STATE_COLORS[v], lw=2.4, zorder=2)
+            x0, x1 = t[s], (t[e] if e < t.size else t[-1])
+            y = float(v) if v else np.nan            # unscored -> gap
+            xs += [x0, x1]
+            ys += [y, y]
+            if v:
+                segs.append(((x0, v), (x1, v)))
+                cols.append(STATE_COLORS[v])
+        # grey staircase outline (the vertical transitions between levels)
+        ax.plot(xs, ys, color="0.55", lw=0.8, zorder=1)
+        # coloured horizontal segment per contiguous run
+        if segs:
+            ax.add_collection(LineCollection(segs, colors=cols, linewidths=2.4,
+                                             zorder=2))
         ax.set_ylim(0.5, 5.5)
 
     @staticmethod
@@ -1036,6 +1167,7 @@ class StateEditor:
         c.mpl_connect("motion_notify_event", self._on_motion)
         c.mpl_connect("button_release_event", self._on_release)
         c.mpl_connect("scroll_event", self._on_scroll)
+        c.mpl_connect("resize_event", self._refresh_visible)  # px per column
 
     def _set_title(self):
         extra = ""
@@ -1131,6 +1263,7 @@ class StateEditor:
         self._sync_sliders(lo, hi)
         if hasattr(self, "stats_lbl"):
             self._update_info()
+        self._refresh_visible()
         self.fig.canvas.draw_idle()
 
     def _update_eeg(self, centre):
@@ -1394,6 +1527,9 @@ class StateEditor:
         self.fig.canvas.draw_idle()
 
     def _apply_state(self, t0, t1, state):
+        # the two Space presses may come in either order — 13 min then 11 min
+        # labels 11-13 min just as 11 then 13 does (it used to be dropped)
+        t0, t1 = sorted((t0, t1))
         i0 = max(0, matlab_round(t0 - self.to[0]))
         i1 = min(self.n_bins - 1, matlab_round(t1 - self.to[0]))
         if i1 < i0:
