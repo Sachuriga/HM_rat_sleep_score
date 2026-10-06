@@ -159,7 +159,37 @@ def detect_sampling_rate(timestamps_file: str, default: float = 1000.0) -> float
 
 
 # Match a channel file whether or not it carries a rat_sessiondate_ prefix.
-_CHANNEL_FILE_RE = re.compile(r"lfp_nt(\d+)_ch\d+\.npy$", re.IGNORECASE)
+_CHANNEL_FILE_RE = re.compile(r"lfp_nt(\d+)_ch(\d+)\.npy$", re.IGNORECASE)
+
+
+def tetrode_channel_columns(channel_map, n_columns) -> dict:
+    """``{tetrode: {channel: LFP column}}`` for every channel the LFP holds.
+
+    The tracker's LFP holds every channel of the probe (4 per tetrode, in any
+    order), so the columns come from its channel map. With no usable map the
+    columns are taken to be one per tetrode (older exports), each as its ch 1.
+    """
+    out: dict[int, dict[int, int]] = {}
+    if channel_map is not None and len(channel_map) == n_columns:
+        for entry in channel_map:
+            nt, ch = entry.get("ntrode"), entry.get("channel")
+            if nt is None or ch is None:
+                continue
+            out.setdefault(int(nt), {})[int(ch)] = int(entry["index"])
+    return out or {k + 1: {1: k} for k in range(n_columns)}
+
+
+def tetrode_columns(channel_map, n_columns) -> dict:
+    """``{tetrode: LFP column}`` — the lowest-numbered channel of each tetrode,
+    the default when no channel within the tetrode is picked."""
+    return {nt: chans[min(chans)] for nt, chans in
+            tetrode_channel_columns(channel_map, n_columns).items()}
+
+
+def tetrode_subchannels(source: dict, tetrode: int) -> list:
+    """Channel numbers available within ``tetrode`` (sorted), for the picker."""
+    return sorted((source or {}).get("tetrodes", {}).get(int(tetrode), {}))
+
 
 # rat token ... Trodes datetime YYYYMMDD_HHMMSS -> "Rat6_20260707_091045_"
 _SESSION_RE = re.compile(r"(?P<rat>[A-Za-z]+\d+).*?(?P<dt>\d{8}_\d{6})")
@@ -245,11 +275,15 @@ def find_lfp_source(folder: str):
 
     Returns a dict describing the source, or ``None`` if none is found::
 
-        {'kind': 'nwb',      'path': ...,  'channels': [1..n], 'n_samples': N}
-        {'kind': 'matrix',   'path': ...,  'channels': [1..n], 'n_samples': N}
+        {'kind': 'nwb',      'path': ...,  'channels': [...], 'columns': {...}, 'n_samples': N}
+        {'kind': 'matrix',   'path': ...,  'channels': [...], 'columns': {...}, 'n_samples': N}
         {'kind': 'channels', 'files': {ch: path}, 'channels': [...], 'n_samples': N}
 
-    ``channels`` is the sorted list of channel numbers available to select.
+    ``channels`` is the sorted list of tetrode numbers available to select;
+    ``columns`` maps each to its default column of the LFP (see
+    :func:`tetrode_columns`). Every source also carries ``tetrodes``,
+    ``{tetrode: {channel: column (or file path)}}``, so any of a tetrode's
+    channels can be loaded with :func:`load_lfp_channel`.
     """
     try:
         import sleep_nwb_store as snwb
@@ -266,19 +300,31 @@ def find_lfp_source(folder: str):
         arr = np.load(mat, mmap_mode="r")
         n_samples = arr.shape[0]
         n_ch = arr.shape[1] if arr.ndim > 1 else 1
-        return {"kind": "matrix", "path": mat,
-                "channels": list(range(1, n_ch + 1)), "n_samples": n_samples}
+        cmap_file = find_output(folder, "channel_map.npy")
+        cmap = None
+        if cmap_file is not None:
+            try:
+                cmap = list(np.load(cmap_file, allow_pickle=True))
+            except Exception as exc:
+                print(f"Warning: could not read {cmap_file}: {exc}")
+        tetrodes = tetrode_channel_columns(cmap, n_ch)
+        columns = tetrode_columns(cmap, n_ch)
+        return {"kind": "matrix", "path": mat, "channels": sorted(columns),
+                "columns": columns, "tetrodes": tetrodes, "n_samples": n_samples}
 
     ch_dir = os.path.join(folder, "channels_npy")
     files: dict[int, str] = {}
     if os.path.isdir(ch_dir):
+        tetrodes: dict[int, dict[int, str]] = {}
         for name in os.listdir(ch_dir):
             m = _CHANNEL_FILE_RE.search(name)   # .search tolerates a prefix
             if m:
-                files[int(m.group(1))] = os.path.join(ch_dir, name)
+                tetrodes.setdefault(int(m.group(1)), {})[int(m.group(2))] = \
+                    os.path.join(ch_dir, name)
+        files = {nt: chans[min(chans)] for nt, chans in tetrodes.items()}
     if files:
         first = np.load(next(iter(files.values())), mmap_mode="r")
-        return {"kind": "channels", "files": files,
+        return {"kind": "channels", "files": files, "tetrodes": tetrodes,
                 "channels": sorted(files), "n_samples": first.shape[0]}
     return None
 
@@ -381,14 +427,26 @@ def load_sleep_channels(folder) -> tuple[dict, str]:
 
 
 def _nwb_lfp_info(nwb_path):
-    """Shape/rate of ``acquisition/lfp`` in a session NWB, or None when absent."""
+    """Shape/rate/tetrode columns of ``acquisition/lfp`` in a session NWB, or
+    None when absent."""
+    import json
     from pynwb import NWBHDF5IO
 
     with NWBHDF5IO(str(nwb_path), mode="r") as io:
+        nwbfile = io.read()
         try:
-            lfp = io.read().get_acquisition("lfp")
+            lfp = nwbfile.get_acquisition("lfp")
         except Exception:
             return None
+        cmap = None
+        try:
+            import sleep_nwb_store as snwb
+            mod, names = snwb.resolve_layout(nwbfile)
+            if mod is not None and names["session_info"] in mod.data_interfaces:
+                info = json.loads(mod[names["session_info"]].description)
+                cmap = info.get("channel_map")
+        except Exception as exc:
+            print(f"Warning: no channel map in {os.path.basename(str(nwb_path))}: {exc}")
         shape = lfp.data.shape
         n_samples = int(shape[0])
         n_ch = int(shape[1]) if len(shape) > 1 else 1
@@ -399,24 +457,40 @@ def _nwb_lfp_info(nwb_path):
             fs = 1.0 / dt if dt > 0 else None
         elif getattr(lfp, "rate", None):
             fs = float(lfp.rate)
+    tetrodes = tetrode_channel_columns(cmap, n_ch)
+    columns = tetrode_columns(cmap, n_ch)
     return {"kind": "nwb", "path": str(nwb_path),
-            "channels": list(range(1, n_ch + 1)),
+            "channels": sorted(columns), "columns": columns, "tetrodes": tetrodes,
             "n_samples": n_samples, "fs": fs}
 
 
-def load_lfp_channel(source: dict, ch: int) -> np.ndarray:
-    """Load one channel (1-based) from a source returned by :func:`find_lfp_source`."""
+def load_lfp_channel(source: dict, ch: int, sub: int | None = None) -> np.ndarray:
+    """Load tetrode ``ch`` (1-based) from a source returned by :func:`find_lfp_source`.
+
+    ``sub`` picks one channel within the tetrode (see :func:`tetrode_subchannels`);
+    ``None`` takes its lowest-numbered channel.
+    """
+    if sub is not None:
+        chans = source.get("tetrodes", {}).get(ch, {})
+        if sub not in chans:
+            raise KeyError(f"tetrode {ch} has no channel {sub} "
+                           f"(have {sorted(chans)})")
+        if source["kind"] == "channels":
+            return np.asarray(np.load(chans[sub]), dtype=np.float64)
+        col = chans[sub]
+    else:
+        col = source.get("columns", {}).get(ch, ch - 1)
     if source["kind"] == "nwb":
         from pynwb import NWBHDF5IO
         # Sliced straight out of HDF5: only this channel's column is read, so a
         # multi-GB session never lands in memory.
         with NWBHDF5IO(source["path"], mode="r") as io:
             data = io.read().get_acquisition("lfp").data
-            col = data[:, ch - 1] if data.ndim > 1 else data[:]
+            col = data[:, col] if data.ndim > 1 else data[:]
             return np.asarray(col, dtype=np.float64).ravel()
     if source["kind"] == "matrix":
         arr = np.load(source["path"], mmap_mode="r")
-        col = arr[:, ch - 1] if arr.ndim > 1 else arr
+        col = arr[:, col] if arr.ndim > 1 else arr
         return np.asarray(col, dtype=np.float64)
     path = source["files"].get(ch)
     if path is None:
@@ -428,11 +502,13 @@ def cache_path(out_folder: str, base_name: str) -> str:
     return os.path.join(out_folder, f"{base_name}.eegstates.npz")
 
 
-def save_cache(path, chs, eeg_fs, specs, fos, to, raw_eeg, motion):
-    """Persist computed spectrograms so re-opening a session is instant."""
+def save_cache(path, chs, eeg_fs, specs, fos, to, raw_eeg, motion, subs=None):
+    """Persist computed spectrograms so re-opening a session is instant.
+    ``subs`` is the channel picked within each tetrode (0 = its default)."""
     np.savez_compressed(
         path,
         chs=np.asarray(chs),
+        subs=np.asarray([s or 0 for s in (subs or [None] * len(chs))]),
         eeg_fs=np.asarray([eeg_fs]),
         specs=np.stack(specs),                 # (n_ch, n_freq, n_time)
         fo=np.asarray(fos[0]),
@@ -442,13 +518,17 @@ def save_cache(path, chs, eeg_fs, specs, fos, to, raw_eeg, motion):
     )
 
 
-def load_cache(path, chs, eeg_fs):
+def load_cache(path, chs, eeg_fs, subs=None):
     """Return cached data if it matches the requested channels + rate, else None."""
     try:
         d = np.load(path, allow_pickle=False)
     except Exception:
         return None
     if list(d["chs"]) != list(chs) or float(d["eeg_fs"][0]) != float(eeg_fs):
+        return None
+    want = [s or 0 for s in (subs or [None] * len(chs))]
+    have = list(d["subs"]) if "subs" in d.files else [0] * len(chs)
+    if [int(x) for x in have] != want:
         return None
     specs = [d["specs"][i] for i in range(d["specs"].shape[0])]
     fos = [d["fo"]] * len(specs)

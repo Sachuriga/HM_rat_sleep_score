@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from processing import (compute_channel_spectrogram, process_motion,
                         detect_sampling_rate, cache_path, save_cache, load_cache,
                         find_lfp_source, load_lfp_channel, find_output,
-                        LFP_FS_MAX)
+                        tetrode_subchannels, LFP_FS_MAX)
 from state_editor import StateEditor
 from mac_vibrancy import apply_vibrancy
 
@@ -321,15 +321,23 @@ class SetupGUI(QMainWindow):
         chrow.addWidget(lbl)
         chrow.addSpacing(6)
         self.ch_edits = []
+        self.sub_combos = []      # one channel (of the tetrode's 4) per slot
         for k in range(3):
             e = QLineEdit(str(k + 1))
             e.setFixedWidth(52)
             e.setValidator(QIntValidator(1, 9999, self))
             e.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            e.setToolTip(f"1-based channel number for slot {k + 1}")
+            e.setToolTip(f"Tetrode (NT) number for slot {k + 1}")
+            sub = QComboBox()
+            sub.setFixedWidth(78)
+            sub.setToolTip("Which channel of this tetrode to score")
+            e.textChanged.connect(lambda _t, k=k: self._refresh_subchannels(k))
             self.ch_edits.append(e)
+            self.sub_combos.append(sub)
             chrow.addWidget(e)
-        chrow.addWidget(self._hint("(1-based; three distinct channels)"))
+            chrow.addWidget(sub)
+            chrow.addSpacing(6)
+        chrow.addWidget(self._hint("(tetrode NT + its channel)"))
         chrow.addStretch(1)
         box2.addLayout(chrow)
 
@@ -513,10 +521,13 @@ class SetupGUI(QMainWindow):
         except ValueError:
             fs_val = fs or 1000.0
         dur = n_samples / fs_val if fs_val else 0
-        layout = "lfp_data.npy" if src["kind"] == "matrix" else "channels_npy/"
+        layout = {"nwb": os.path.basename(src.get("path", "")) or ".nwb",
+                  "matrix": "lfp_data.npy"}.get(src["kind"], "channels_npy/")
         rng = f"{chans[0]}-{chans[-1]}" if chans else "none"
+        n_wires = sum(len(v) for v in src.get("tetrodes", {}).values()) or len(chans)
         self.info_label.setText(
-            f"{len(chans)} channels ({rng}) via {layout}, {n_samples:,} samples, "
+            f"{len(chans)} tetrodes ({rng}), {n_wires} channels via {layout}, "
+            f"{n_samples:,} samples, "
             f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
     def _prefill_sleep_channels(self, folder):
@@ -556,13 +567,44 @@ class SetupGUI(QMainWindow):
             self._set_status(f"Channels set from {source}: "
                              f"{', '.join(filled)}.", OK_GREEN)
 
-    def _channel_labels(self, chs):
+    def _refresh_subchannels(self, k):
+        """List the channels of the tetrode typed in slot ``k``, keeping the
+        current pick when the new tetrode has it too."""
+        combo = self.sub_combos[k]
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        try:
+            nt = int(self.ch_edits[k].text().strip())
+        except ValueError:
+            nt = None
+        chans = tetrode_subchannels(self.lfp_source, nt) if nt is not None else []
+        for ch in chans:
+            combo.addItem(f"ch {ch}", ch)
+        if prev in chans:
+            combo.setCurrentIndex(chans.index(prev))
+        combo.setEnabled(len(chans) > 1)
+        combo.blockSignals(False)
+
+    def _subchannels(self):
+        """Picked channel within each slot's tetrode (None = its default)."""
+        return [c.currentData() for c in self.sub_combos]
+
+    def _channel_labels(self, chs, subs=None):
         """Display name per entered channel: the SLEEP_CHANNELS role it matches,
         else None so the editor falls back to ``Ch <n>``. Matching by value (not
-        by slot) keeps the names honest when a box is typed over or reordered."""
+        by slot) keeps the names honest when a box is typed over or reordered.
+        A channel picked within a multi-channel tetrode is appended (``EEG ch 3``)."""
         by_ch = {int(ch): label for role, label in SLEEP_ROLE_LABELS
                  if (ch := self.sleep_channels.get(role)) is not None}
-        return [by_ch.get(int(c)) for c in chs]
+        subs = subs or [None] * len(chs)
+        out = []
+        for c, sub in zip(chs, subs):
+            name = by_ch.get(int(c))
+            if sub is not None and len(tetrode_subchannels(self.lfp_source, c)) > 1:
+                name = f"{name or 'NT'} ch {sub}"
+            out.append(name)
+        return out
 
     def _sel_lfp(self):
         folder = QFileDialog.getExistingDirectory(self, "Select LFP Output Folder")
@@ -575,11 +617,15 @@ class SetupGUI(QMainWindow):
             self._set_status("Warning: no .nwb (or lfp_data.npy / channels_npy/) found here.", WARN)
             self.info_label.setText("")
             self._set_dot(self.lfp_dot, "warn")
+            for k in range(len(self.ch_edits)):
+                self._refresh_subchannels(k)
         else:
             self._set_status("Folder loaded. Enter channels, then Launch.", INK)
             self._set_dot(self.lfp_dot, "ok")
             self._show_recording_info(folder)
             self._prefill_sleep_channels(folder)
+            for k in range(len(self.ch_edits)):
+                self._refresh_subchannels(k)
             # Auto-detect the rat_sessiondate_ prefix from the folder's files and
             # use it as the session name, so saved files share the session naming.
             from processing import output_prefix
@@ -727,7 +773,8 @@ class SetupGUI(QMainWindow):
             except (ValueError, AssertionError):
                 return self._set_status(f"Error: Ch {k + 1} must be a whole number >= 1.", ERR)
             chs.append(val)
-        if len(set(chs)) < 3:
+        subs = self._subchannels()
+        if len(set(zip(chs, subs))) < 3:
             return self._set_status("Error: all 3 channels must differ.", ERR)
 
         base = self.name_edit.text().strip() or "session"
@@ -740,12 +787,13 @@ class SetupGUI(QMainWindow):
         if pfx and not base.startswith(pfx) and not base.startswith(pfx.rstrip("_")):
             base = f"{pfx}{base}"
         try:
-            self._run(chs, eeg_fs, base)
+            self._run(chs, eeg_fs, base, subs)
         except Exception as exc:  # surface any load/compute failure in the GUI
             self._set_status(f"Error: {exc}", ERR)
             raise
 
-    def _run(self, chs, eeg_fs, base):
+    def _run(self, chs, eeg_fs, base, subs=None):
+        subs = list(subs) if subs else [None] * len(chs)
         source = self.lfp_source or find_lfp_source(self.lfp_folder)
         if source is None:
             return self._set_status(
@@ -755,7 +803,7 @@ class SetupGUI(QMainWindow):
         cached = None
         if not self.recompute_chk.isChecked() and os.path.isfile(cpath):
             self._set_status("Loading cached spectrograms ...", "#0000aa")
-            cached = load_cache(cpath, chs, eeg_fs)
+            cached = load_cache(cpath, chs, eeg_fs, subs)
 
         if cached is not None:
             specs, fos, to, raw_eeg, motion = cached
@@ -769,11 +817,12 @@ class SetupGUI(QMainWindow):
 
             specs, fos, raw_eeg = [], [], []
             to = None
-            for n, c in enumerate(chs, 1):
+            for n, (c, sub) in enumerate(zip(chs, subs), 1):
+                which = f"NT{c}" + (f" ch {sub}" if sub is not None else "")
                 self._set_status(
-                    f"Preprocessing + spectrogram, channel {c} ({n}/{len(chs)}) ...",
+                    f"Preprocessing + spectrogram, {which} ({n}/{len(chs)}) ...",
                     "#0000aa")
-                sig = load_lfp_channel(source, c)
+                sig = load_lfp_channel(source, c, sub)
                 spec, fo, to, cleaned = compute_channel_spectrogram(sig, eeg_fs)
                 specs.append(spec)
                 fos.append(fo)
@@ -790,7 +839,7 @@ class SetupGUI(QMainWindow):
 
             self._set_status("Caching spectrograms for fast reload ...", "#0000aa")
             try:
-                save_cache(cpath, chs, eeg_fs, specs, fos, to, raw_eeg, motion)
+                save_cache(cpath, chs, eeg_fs, specs, fos, to, raw_eeg, motion, subs)
             except Exception as exc:
                 print(f"Warning: could not write cache: {exc}")
 
@@ -816,7 +865,7 @@ class SetupGUI(QMainWindow):
         self._set_status("Launching state editor ...", OK_GREEN)
         editor = StateEditor(base, specs, fos, to, motion, raw_eeg, eeg_fs,
                              out_folder=self.out_folder, chs=chs,
-                             ch_labels=self._channel_labels(chs),
+                             ch_labels=self._channel_labels(chs, subs),
                              auto_states=auto_states, auto_states_ts=auto_ts,
                              overlays=overlays, states=states,
                              labeled_by=labeled_by, nwb_path=self.nwb_path,
