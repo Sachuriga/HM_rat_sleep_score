@@ -127,11 +127,17 @@ keyboard/mouse controls.
   whole window, `Home`/`End` jump to the ends, and **`0`** (or `r`) snaps back
   to the whole recording. (Near either end of the recording the view runs out
   of room, so the cursor sits off-centre.)
-- **Saving is automatic**: closing the editor writes the scoring (both `.npz`
-  and `.mat`) — to the file you resumed from, or a new dated one — so there is
-  no Save button and nothing to remember. `s` forces that same save mid-session
-  if you want a checkpoint, **Load** (`l`) opens an earlier scoring, and `u`
-  undoes the last change.
+- **Closing asks before saving**: if there are unsaved changes (marked `*` in
+  the window title), closing asks **Save** (the default), **Don't Save**, or
+  **Cancel**. Saving writes the scoring into the session `.nwb` as your entry
+  (one per scorer), or, for a session without an NWB, to `results/` as `.npz`
+  + `.mat`. `s` saves mid-session if you want a checkpoint, **Load** (`l`)
+  opens an earlier scoring, and `u` undoes the last change.
+- **Your scoring is never silently replaced**: if you start a fresh scoring and
+  type a name that already has one for this session, the editor asks first —
+  **Continue it** (the default; its labels load and saving updates it),
+  **Start over** (saving will replace it), or **Use another name**. A save
+  that fails part-way leaves the stored scoring untouched.
 
 ## Output
 

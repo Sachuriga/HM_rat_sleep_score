@@ -16,8 +16,8 @@ periods and microarousals into WAKE.
 Every bin starts as NREM (3) by default, so scoring means re-labelling the
 non-NREM stretches rather than covering the whole recording.
 
-On launch the editor asks who is scoring ("Labeled by") and, on close, saves
-the scoring automatically to a ``results/`` subfolder of the input folder as
+On launch the editor asks who is scoring ("Labeled by") and, on close, asks
+whether to save unsaved changes to a ``results/`` subfolder of the input folder as
 ``results_<date>_<name>.npz`` / ``.mat``.  Resuming an earlier scoring (loading
 one at launch or with ``l``) skips that prompt — the file's own scorer name is
 adopted — and saving updates that same file instead of creating a new one.
@@ -145,7 +145,7 @@ HELP_LINES = [
     ("[ / ]", "previous / next event number (1-10)"),
     ("n / p", "jump to next / previous event"),
     ("", ""),
-    ("s", "save now (closing saves by itself)"),
+    ("s", "save now (closing asks if unsaved)"),
     ("l", "load a saved scoring"),
     ("h", "toggle this help"),
 ]
@@ -246,7 +246,7 @@ if _HAVE_QT:
     class _EditorWindow(QMainWindow):
         """Top-level Qt window hosting the editor's matplotlib canvas.
 
-        Closing it auto-saves the scoring to the results folder and stops the
+        Closing it asks whether to save unsaved changes, then stops the
         nested event loop that ``StateEditor.show()`` spins."""
 
         def __init__(self, editor):
@@ -274,7 +274,7 @@ class StateEditor:
         self.base_name = base_name
         self.eeg_fs = float(eeg_fs)
         self.out_folder = out_folder
-        # Auto-save on close goes here (results/ inside the input folder).
+        # Saves without an NWB go here (results/ inside the input folder).
         self.results_folder = results_folder or os.path.join(out_folder, "results")
         self.labeled_by = labeled_by       # scorer name, asked on launch if unset
         # Session NWB (tracker step 8). When set it is the primary store: one
@@ -339,7 +339,7 @@ class StateEditor:
         self.current_state = None
         self.pending_bound = None
         self.pending_line = []
-        self.dirty = False          # edited since the last save (not shown: saving is automatic)
+        self.dirty = False          # edited since the last save (" *" in the title)
         self.help_visible = False
         # movable time cursor (← → step it, space confirms epoch bounds)
         self._dt = float(np.median(np.diff(self.to))) if self.n_bins > 1 else 1.0
@@ -1116,12 +1116,25 @@ class StateEditor:
         self.fig.canvas.draw_idle()
 
     def _confirm_close(self):
-        """Auto-save the scoring to the results folder, then allow the close.
+        """Ask whether to save unsaved changes, then allow the close.
 
-        Called from ``_EditorWindow.closeEvent``. If the save fails the user is
-        asked whether to close anyway (No keeps the window open)."""
+        Called from ``_EditorWindow.closeEvent``. With nothing changed since the
+        last save the window just closes. Otherwise the scorer picks Save (the
+        default), Don't Save, or Cancel (keeps the window open). If the save
+        fails they are asked whether to close anyway."""
         if not _HAVE_QT or self.win is None:
             return True
+        if not self.dirty:
+            return True
+        btn = QMessageBox.StandardButton
+        resp = QMessageBox.question(
+            self.win, "Save scoring?",
+            "Save your changes to the scoring before closing?",
+            btn.Save | btn.Discard | btn.Cancel, btn.Save)
+        if resp == btn.Discard:
+            return True
+        if resp != btn.Save:
+            return False                      # Cancel / Esc: keep editing
         try:
             self.save_results()
         except Exception as exc:
@@ -1217,7 +1230,8 @@ class StateEditor:
             extra = f" - Delete Event {self.event_num} (click near a mark)"
         src = (f" — {os.path.basename(self.results_path)}"
                if getattr(self, "results_path", None) else "")
-        self._set_window_title(f"States: {self.base_name}{src}{extra}")
+        mark = " *" if getattr(self, "dirty", False) else ""   # unsaved changes
+        self._set_window_title(f"States: {self.base_name}{src}{mark}{extra}")
         self._sync_state_buttons()
         self._update_badge()
         self._update_match()
@@ -1262,8 +1276,8 @@ class StateEditor:
     def _update_statusbar(self):
         """Reflect scored coverage, scorer and save target in the Qt status bar.
 
-        There is no saved/unsaved flag: closing the window writes the scoring,
-        so the only thing worth showing is where it will land."""
+        Unsaved changes also show in the window title; closing with any asks
+        whether to save them."""
         if getattr(self, "win", None) is None:
             return
         scored, total = self._coverage()
@@ -1453,7 +1467,7 @@ class StateEditor:
         elif k == "u":
             self._undo()
         elif k == "s":
-            self.save_results()         # the same save that closing performs
+            self.save_results()         # the same save that closing offers
         elif k == "l":
             self.load_states()
         elif k == "h":
@@ -1717,7 +1731,7 @@ class StateEditor:
     def save_results(self):
         """Save the scoring, into the session NWB when there is one.
 
-        Called automatically when the editor window closes. The NWB is the
+        Offered when the editor window closes with unsaved changes. The NWB is the
         store: one entry per scorer, replaced on every save. The
         ``results/results_<date>_<name>.npz`` + ``.mat`` pair is only written
         when the NWB is missing or refuses the write, so a normal session
@@ -1845,7 +1859,12 @@ class StateEditor:
 
     def _prompt_labeled_by(self):
         """Modal "Labeled by" prompt shown on launch. The name is required — it
-        goes into the auto-saved results filename. Returns False on Cancel."""
+        names the stored scoring. Returns False on Cancel.
+
+        A name that already has a scoring of this session is not taken blindly:
+        saving would replace that scoring with this (blank) one, which is how
+        relaunching and retyping your own name used to wipe your labels. The
+        scorer is asked to continue it, start over, or pick another name."""
         while True:
             name, ok = QInputDialog.getText(
                 self.win, "Labeled by",
@@ -1854,9 +1873,102 @@ class StateEditor:
             if not ok:
                 return False
             name = name.strip()
-            if name:
-                self.labeled_by = name
-                return True
+            if not name:
+                continue
+            found = self._existing_scoring(name)
+            if found is not None:
+                choice = self._ask_existing(name, found)
+                if choice == "cancel":
+                    continue                     # back to the name prompt
+                if choice == "continue":
+                    self._adopt_scoring(found)
+            self.labeled_by = name
+            return True
+
+    def _existing_scoring(self, name):
+        """The stored scoring that saving under ``name`` would replace, or None.
+
+        With a session NWB that is the scorer's entry there, matched the way a
+        save names it (by slug, so "Sachu Riga" and "Sachu_Riga" collide just as
+        their tables do). Without one it is today's ``results_<date>_<name>``
+        file. Returns ``{"where", "states", "events", "path"}``; ``states`` is
+        None when the stored scoring does not fit this session's bins.
+        """
+        if self.nwb_path and os.path.isfile(self.nwb_path):
+            import sleep_nwb_store as snwb
+            table = snwb.STATES_PREFIX + snwb._slug(name)
+            try:
+                entry = next((e for e in snwb.list_scorings(self.nwb_path)
+                              if e["name"] == table), None)
+                if entry is None:
+                    return None
+                states, _, meta = snwb.read_scoring(self.nwb_path, name=table,
+                                                    timestamps=self.to)
+            except Exception as exc:
+                print(f"Warning: could not check {self.nwb_path} for {name}: {exc}")
+                return None
+            return {"where": f"{os.path.basename(self.nwb_path)}, saved "
+                             f"{entry.get('date') or '?'}",
+                    "states": states, "events": meta.get("events"), "path": None}
+        stem = "_".join(name.split()) or "unknown"
+        path = os.path.join(self.results_folder,
+                            f"results_{_datetime.date.today().isoformat()}_{stem}.npz")
+        if not os.path.isfile(path):
+            return None
+        data = np.load(path)
+        states = np.asarray(data["states"]).ravel() if "states" in data else None
+        if states is not None and states.size != self.n_bins:
+            states = None
+        return {"where": os.path.basename(path), "states": states,
+                "events": data["events"] if "events" in data else None,
+                "path": path}
+
+    def _ask_existing(self, name, found):
+        """Ask what to do about ``name``'s existing scoring.
+
+        Returns "continue", "replace" or "cancel" (choose another name).
+        Continuing is the default button: it is what a scorer reopening their
+        own session means, and the one choice that cannot lose work."""
+        box = QMessageBox(self.win)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Scoring already exists")
+        box.setText(f"{name} already has a scoring of this session.")
+        if found["states"] is not None:
+            box.setInformativeText(
+                f"Stored in {found['where']}.\n\n"
+                f"Continue it: its labels are loaded, and saving updates it.\n"
+                f"Start over: begin blank — saving will REPLACE the stored "
+                f"scoring.")
+            cont = box.addButton("Continue it", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            box.setInformativeText(
+                f"Stored in {found['where']}, but it does not fit this "
+                f"session's bins, so it cannot be continued here.\n\n"
+                f"Start over: saving will REPLACE the stored scoring.")
+            cont = None
+        over = box.addButton("Start over", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Use another name", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cont or box.buttons()[-1])
+        box.exec()
+        clicked = box.clickedButton()
+        if cont is not None and clicked is cont:
+            return "continue"
+        return "replace" if clicked is over else "cancel"
+
+    def _adopt_scoring(self, found):
+        """Load a stored scoring into the editor, to be continued and saved
+        back over itself."""
+        self.states = sanitize_states(found["states"])
+        self.history = []
+        ev = found.get("events")
+        if ev is not None and np.size(ev):
+            self.events = [[int(round(n)), float(t)]
+                           for n, t in np.asarray(ev, dtype=float).reshape(-1, 2)]
+            self._refresh_events()
+        if found.get("path"):
+            self.results_path = found["path"]      # .npz store: update it in place
+        self._refresh_state_bar()
+        print(f"Continuing the stored scoring ({found['where']})")
 
     def show(self):
         """Show the editor window and block until it is closed.

@@ -58,6 +58,10 @@ STATES_PREFIX = "states_"
 EVENTS_PREFIX = "events_"
 AUTO_STATES_NAME = "auto_states"   # the automatic scoring, kept apart from people's
 LAYOUT_NAME = "layout"          # where the contract below is recorded in the file
+# A save is written under this prefix first and only renamed over the old
+# tables once it is safely on disk (see _write_states_table). The prefix keeps
+# a half-finished save out of list_scorings, which only reads STATES_PREFIX.
+PENDING_PREFIX = "pending_"
 LAYOUT_VERSION = 1
 
 # HM state codes, shared with the editor (1 WAKE / 3 NREM / 5 REM; 0 unscored).
@@ -371,6 +375,13 @@ def _write_states_table(nwb_path, table_name, states, timestamps, meta,
     """Write one run-length state table into ``processing/sleep`` (in place).
 
     Replaces any table of the same name, so re-saving never leaves two copies.
+
+    The replacement is write-then-swap: the new tables go in under
+    ``PENDING_PREFIX`` names, and only once pynwb has written them are the old
+    ones deleted and the new ones renamed into place. This used to delete the
+    old tables first, so any failure in the write — an unwritable file, or a
+    scoring with every bin erased, which pynwb refused to write — left the
+    scorer with no stored scoring at all.
     """
     from pynwb import NWBHDF5IO, TimeSeries
     from pynwb.epoch import TimeIntervals
@@ -385,19 +396,25 @@ def _write_states_table(nwb_path, table_name, states, timestamps, meta,
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "state_names": {str(k): v for k, v in STATE_NAMES.items()}}
 
-    # drop the previous tables first, at the HDF5 level: pynwb can only add to
-    # an r+ file, so replacing means deleting before reopening.
-    _h5_delete(nwb_path, [table_name, events_name])
+    pending_table = PENDING_PREFIX + table_name
+    pending_events = PENDING_PREFIX + events_name if events_name else None
+    # leftovers of a save that was interrupted before its swap
+    _h5_delete(nwb_path, [pending_table, pending_events])
 
     io = NWBHDF5IO(str(nwb_path), mode="r+")
     try:
         nwbfile = io.read()
         mod = _sleep_module(nwbfile, create=True)
 
-        table = TimeIntervals(name=table_name, description=json.dumps(meta))
-        table.add_column(name="state", description="Sleep state name.")
+        table = TimeIntervals(name=pending_table, description=json.dumps(meta))
+        # typed empty data: with no rows (every bin erased) pynwb cannot infer
+        # a column's dtype and refuses to write the table
+        table.add_column(name="state", description="Sleep state name.",
+                         data=np.array([], dtype=str))
         table.add_column(name="state_code",
-                         description="HM state code: 1 awake, 3 NREM, 5 REM.")
+                         description="HM state code: 1 awake, 3 NREM, "
+                                     "4 intermediate, 5 REM.",
+                         data=np.array([], dtype=np.int64))
         for s, e, code in _runs(states):
             if code == 0:
                 continue                       # unscored bins leave a gap
@@ -410,12 +427,17 @@ def _write_states_table(nwb_path, table_name, states, timestamps, meta,
         events = np.asarray(events if events is not None else
                             np.zeros((0, 2)), dtype=float).reshape(-1, 2)
         if events.size and events_name:
-            mod.add(TimeSeries(name=events_name, data=events[:, 0],
+            mod.add(TimeSeries(name=pending_events, data=events[:, 0],
                                timestamps=events[:, 1], unit="n/a",
                                description=events_desc))
         io.write(nwbfile)
     finally:
         io.close()
+
+    # The new copy is on disk; only now does the old one go. A save with no
+    # events still removes the old events, as a full replacement should.
+    _h5_swap(nwb_path, [(pending_table, table_name),
+                        (pending_events, events_name)])
     return table_name
 
 
@@ -504,6 +526,35 @@ def _h5_delete(nwb_path, names):
                     del mod[name]
                     deleted.append(name)
     return deleted
+
+
+def _h5_swap(nwb_path, pairs):
+    """Replace each ``final`` container with its ``pending`` copy.
+
+    Called only after the pending copies were written successfully. For every
+    ``(pending, final)`` pair the old ``final`` is deleted and ``pending``, if
+    it was written, is renamed to it — so a save without events also clears
+    the old events, as a full replacement should. Renaming at the HDF5 level
+    is safe for the same reason deleting is (see :func:`_h5_delete`): pynwb
+    takes a container's name from its group, so it reads back as ``final``.
+    """
+    import h5py
+
+    pairs = [(p, f) for p, f in pairs if f]
+    if not pairs:
+        return
+    with h5py.File(str(nwb_path), "r+") as h5:
+        processing = h5.get("/processing")
+        if processing is None:
+            return
+        for mod in processing.values():
+            if not any((p and p in mod) or f in mod for p, f in pairs):
+                continue                      # not the module we wrote to
+            for pending, final in pairs:
+                if final in mod:
+                    del mod[final]
+                if pending and pending in mod:
+                    mod.move(pending, final)
 
 
 def _runs(states):

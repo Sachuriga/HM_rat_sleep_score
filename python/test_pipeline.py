@@ -305,4 +305,109 @@ assert len(lit) == 1 and abs(lit[0] - ed5.to[60]) < 1e-6, f"isolated bin not dra
 assert abs(colw - ed5._dt) < 1e-9, "band bins should be one bin wide"
 print("motion band shows isolated bins ok")
 
+# ---- Saving can never wipe a stored scoring ---------------------------------
+try:
+    import pynwb  # noqa: F401
+    HAVE_PYNWB = True
+except ImportError:
+    HAVE_PYNWB = False
+    print("pynwb missing: NWB scoring-store checks skipped")
+
+if HAVE_PYNWB:
+    import tempfile, datetime as _dt
+    from pynwb import NWBFile, NWBHDF5IO, TimeSeries
+    import sleep_nwb_store as snwb
+    import state_editor as se_mod
+
+    nwb = os.path.join(tempfile.mkdtemp(), "RatT_20260101.nwb")
+    f = NWBFile(session_description="t", identifier="t",
+                session_start_time=_dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc))
+    f.add_acquisition(TimeSeries(name="lfp", data=np.zeros((10, 2)), unit="uV", rate=1.0))
+    with NWBHDF5IO(nwb, "w") as io_:
+        io_.write(f)
+    good = np.full(to.size, 3); good[40:60] = 5
+    ev = np.array([[1, 20.0]])
+    snwb.write_scoring(nwb, good, to, scorer="Tester", events=ev)
+
+    # a save that fails mid-write leaves the stored scoring (and events) intact
+    real_write = pynwb.NWBHDF5IO.write
+    pynwb.NWBHDF5IO.write = lambda self, *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+    try:
+        snwb.write_scoring(nwb, np.ones(to.size, int), to, scorer="Tester")
+        raise AssertionError("the simulated failure did not raise")
+    except OSError:
+        pass
+    finally:
+        pynwb.NWBHDF5IO.write = real_write
+    st, _, meta = snwb.read_scoring(nwb, scorer="Tester", timestamps=to)
+    assert (st == good).all(), "a failed save destroyed the stored scoring"
+    assert meta["events"].tolist() == ev.tolist(), "a failed save destroyed the events"
+    assert [e["scorer"] for e in snwb.list_scorings(nwb)] == ["Tester"], \
+        "a half-written save leaked into the scorer list"
+
+    # an all-erased scoring saves (pynwb used to refuse its empty table), and a
+    # save without events clears the old ones
+    snwb.write_scoring(nwb, np.zeros(to.size, int), to, scorer="Tester")
+    st, _, meta = snwb.read_scoring(nwb, scorer="Tester", timestamps=to)
+    assert (st == 0).all() and meta["events"].size == 0
+    snwb.write_scoring(nwb, good, to, scorer="Tester", events=ev)
+    print("NWB save is write-then-swap: failures and empty scorings are safe")
+
+    # Relaunching and retyping your own name must not replace your scoring
+    ed7 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs,
+                      out_folder="/tmp", nwb_path=nwb)
+    assert (ed7.states == 3).all()                     # a fresh session
+    found = ed7._existing_scoring("Tester")
+    assert found is not None and (found["states"] == good).all()
+    assert ed7._existing_scoring("Somebody Else") is None
+    answers = {"choice": "continue"}
+    names = []
+    se_mod.QInputDialog.getText = staticmethod(lambda *a, **k: (names.pop(0), True))
+    # stand-ins for the two modal dialogs (no QApplication in this headless test)
+    se_mod.StateEditor._ask_existing = lambda self, name, fnd: answers["choice"]
+    names[:] = ["Tester"]
+    assert ed7._prompt_labeled_by() and ed7.labeled_by == "Tester"
+    assert (ed7.states == good).all(), "continuing did not load the stored labels"
+    assert ed7.events == [[1, 20.0]], "continuing did not load the stored events"
+    ed7.save_results()
+    st, _, _ = snwb.read_scoring(nwb, scorer="Tester", timestamps=to)
+    assert (st == good).all(), "saving a continued scoring changed it"
+
+    ed8 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs,
+                      out_folder="/tmp", nwb_path=nwb)
+    answers["choice"] = "cancel"                       # "use another name"
+    names[:] = ["Tester", "Student"]
+    assert ed8._prompt_labeled_by() and ed8.labeled_by == "Student"
+    assert (ed8.states == 3).all(), "another name should start blank"
+    ed8.save_results()
+    st, _, _ = snwb.read_scoring(nwb, scorer="Tester", timestamps=to)
+    assert (st == good).all(), "a different scorer's save touched Tester's scoring"
+    assert sorted(e["scorer"] for e in snwb.list_scorings(nwb)) == ["Student", "Tester"]
+    print("retyping your own name offers your scoring instead of replacing it")
+
+# ---- Closing asks whether to save unsaved changes ---------------------------
+import state_editor as se_mod
+if se_mod._HAVE_QT:
+    Btn = se_mod.QMessageBox.StandardButton
+    ed9 = StateEditor("test", specs, fos, to, motion, raw_eeg, fs, out_folder="/tmp")
+    ed9.win = object()                                 # stand-in: no real window
+    saves, asked = [], []
+    ed9.save_results = lambda: saves.append(1)
+    real_question = se_mod.QMessageBox.question
+    reply = {"b": Btn.Save}
+    se_mod.QMessageBox.question = staticmethod(
+        lambda *a, **k: (asked.append(1), reply["b"])[1])
+    try:
+        ed9.dirty = False
+        assert ed9._confirm_close() and not asked, "no changes: close without asking"
+        ed9.dirty = True
+        assert ed9._confirm_close() and saves == [1], "Save should save and close"
+        reply["b"] = Btn.Discard
+        assert ed9._confirm_close() and saves == [1], "Don't Save should just close"
+        reply["b"] = Btn.Cancel
+        assert not ed9._confirm_close() and saves == [1], "Cancel keeps it open"
+    finally:
+        se_mod.QMessageBox.question = real_question
+    print("closing asks Save / Don't Save / Cancel when there are changes")
+
 print("\nALL CHECKS PASSED")
