@@ -24,12 +24,17 @@ transitional/intermediate substates are folded into WAKE.
 
 States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 
-Two scorers live here, and **this threshold scorer is the default**: it needs
-no training and runs on any session. A model fitted to hand-scored sessions
-(see ``fit_auto_score.py``) reached kappa 0.82 on the session it was fitted to,
-but a model fitted to one session of one rat did not transfer to other
-recordings, so it is opt-in per folder (``model="auto"`` or a path) rather than
-picked up because a file happens to be there.
+Two scorers live here, and **the default is the fitted model** shipped in
+``models/sleep_score_model.npz`` (see ``fit_auto_score.py``), not this
+threshold scorer. It was fitted to Michelle's hand scoring of Rat6 20260720,
+pre and post together. Held out one session at a time it agrees with her at
+kappa 0.81 (pre) / 0.87 (post) on WAKE/NREM/REM, against 0.61 / 0.77 for the
+thresholds below — whose histogram dips land in different places in the two
+sessions even though each state's metric values barely move. Two people
+scoring the pre session agree at 0.80. Both sessions are one rat on one day,
+so check it against hand scoring before relying on it for another rat;
+``model=None`` (``--model none``) gives the threshold scorer, which needs no
+training at all.
 
 The movement gate on REM prefers the EMG-from-LFP file, falling back to the
 LFP's own high-frequency power (``HF_BAND``) so sessions with neither an
@@ -449,6 +454,12 @@ def _load_motion(lfp_dir, fs):
     return m, np.arange(m.size) * (100.0 / fs)
 
 
+# The model every session is scored with unless told otherwise: fitted to
+# Michelle's scoring of Rat6 20260720 pre + post (fit_auto_score.py). Refit and
+# overwrite it as more sessions are hand-scored.
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "sleep_score_model.npz"
+
+
 def _resolve_model(model, lfp_dir):
     """Turn the ``model`` argument into ``(model dict, name)``, or ``(None, None)``."""
     if model is None:
@@ -456,6 +467,12 @@ def _resolve_model(model, lfp_dir):
     import fit_auto_score as fa
     if isinstance(model, dict):
         return model, "fitted model"
+    if model == "default":
+        if not DEFAULT_MODEL_PATH.is_file():
+            print(f"  warning: the default model {DEFAULT_MODEL_PATH} is missing "
+                  f"— using the threshold scorer")
+            return None, None
+        return fa.load_model(DEFAULT_MODEL_PATH), "default model"
     path = fa.find_model(lfp_dir) if model == "auto" else model
     if path is None:
         return None, None
@@ -463,7 +480,7 @@ def _resolve_model(model, lfp_dir):
 
 
 def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
-                          sr_channel=None, fs=None, model=None,
+                          sr_channel=None, fs=None, model="default",
                           use_motion=False, **kw):
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
@@ -473,14 +490,12 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
     (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
 
-    ``model`` selects the scorer. The default ``None`` is the threshold scorer
-    above — the published parameters, nothing fitted. ``"auto"`` opts in to a
-    model fitted to hand-scored sessions if one is found in the folder (see
-    ``fit_auto_score.py``); a path or a loaded model forces a specific one.
-    A fitted model is deliberately *not* the default: one fitted to a single
-    session of one rat scored well on that session and did not transfer, so it
-    has to be asked for, per folder, rather than picked up because a file
-    happens to sit there.
+    ``model`` selects the scorer. The default ``"default"`` is the fitted model
+    shipped in ``DEFAULT_MODEL_PATH`` (WAKE/NREM/intermediate/REM; it ignores
+    the threshold factors). ``None`` is the threshold scorer above — the
+    published parameters, nothing fitted. ``"auto"`` uses a model fitted for
+    this folder if one is found there (see ``fit_auto_score.py``); a path or a
+    loaded model forces a specific one.
 
     ``use_motion`` adds the accelerometer to the REM movement gate. Off by
     default: not every session records motion, so leaving it out keeps one
@@ -563,10 +578,11 @@ def main():
                     help=f"Output .npz (default: <lfp_folder>/{DEFAULT_OUT}).")
     ap.add_argument("--min_secs", type=float, default=10.0,
                     help="Minimum state-run duration (s).")
-    ap.add_argument("--model", default="none",
-                    help="Fitted model to score with: a path, or 'auto' to use one "
-                         "found in the folder. Default 'none' = the threshold "
-                         "scorer with the published parameters.")
+    ap.add_argument("--model", default="default",
+                    help="Scorer: 'default' = the fitted model shipped in "
+                         "models/sleep_score_model.npz; 'none' = the threshold "
+                         "scorer with the published parameters; 'auto' = a model "
+                         "found in the folder; or a path to a model file.")
     ap.add_argument("--sw_factor", type=float, default=SW_THRESH_FACTOR,
                     help="Scale the slow-wave (NREM) cutoff; 1.0 = the bimodal dip, "
                          ">1 = less NREM.")

@@ -221,7 +221,46 @@ For display the spectrogram is frequency-binned (~0.5 Hz), smoothed across time
 with a 10-point Hann window, log-scaled, and channels 2–3 are normalised to the
 dynamic range of channel 1 — matching `TheStateEditor.m`.
 
-## Buzsáki automatic scoring (optional)
+## Automatic scoring: the default model
+
+Sessions are auto-scored by a **fitted model** shipped with the toolkit,
+[`models/sleep_score_model.npz`](models/sleep_score_model.npz) — a Gaussian
+model per state over eight LFP features, decoded with Viterbi (see
+[Fitting the auto-scorer](#fitting-the-auto-scorer-to-your-own-scoring)). It
+scores WAKE / NREM / intermediate / REM from the LFP alone.
+
+It was fitted to Michelle's hand scoring of **Rat6 20260720, pre (1.9 h) and
+post (4 h)**. Fitted on one of the two and scored on the other:
+
+| held-out session | κ WAKE/NREM/REM | κ with intermediate | recall WAKE / NREM / INTER / REM |
+|---|---|---|---|
+| pre  | 0.81 | 0.81 | 0.90 / 0.90 / 0.65 / 0.97 |
+| post | 0.87 | 0.85 | 0.90 / 0.98 / 0.37 / 0.90 |
+
+For comparison on the same labels: the threshold scorer below gets κ 0.61
+(pre) and 0.77 (post), and two people scoring the pre session agree at κ 0.80.
+Re-tuning the thresholds does not close the gap — tuned on one session they
+score 0.54–0.55 on the other, because each cutoff is a histogram dip found
+afresh per session and the dips move (theta 0.51 in pre, 0.33 in post) while
+each state's own values barely do.
+
+**One rat, one day.** The two sessions share the rat, the electrodes and the
+day, so this shows transfer between sessions, not between rats. On a new rat,
+compare the auto-score with some hand scoring before relying on it, and as
+more sessions are scored, refit on all of them and overwrite the model —
+labels can be read straight out of each session NWB by scorer name:
+
+```bash
+python fit_auto_score.py \
+    --lfp_folder <Rat_HM_Neuron>/pre/Rat6/20260720  --labels Michelle \
+    --lfp_folder <Rat_HM_Neuron>/post/Rat6/20260720 --labels Michelle \
+    --out models/sleep_score_model.npz
+```
+
+The setup GUI's **Scorer** dropdown picks the model (default) or the threshold
+scorer; on the command line, `--model none` gives the thresholds.
+
+## Threshold scorer (Buzsáki)
 
 `buzsaki_score.py` is a Python port of the brain-state segregation in Watson et
 al. (2016, *Neuron* 90:839–852). It labels each 1 s bin **WAKE / NREM / REM**
@@ -254,19 +293,15 @@ accelerometer. Accelerometer motion is added only with `--use_motion`: not
 every session records it, and a threshold that leans on it does not transfer to
 the sessions that don't.
 
-Two thresholds were re-fitted against a hand-scored session (4 h, all states):
-`SW_THRESH_FACTOR = 1.25`, because the slow-wave histogram dip sits *below* the
-REM mode and the raw cutoff therefore labels most REM as NREM; and the movement
-ceiling, now the 60th percentile of the movement signal rather than its bimodal
-dip, which lands in very different places on the EMG and high-frequency traces.
-Together they take agreement with the hand scoring from 80% (κ 0.57) to 87%
-(κ 0.75), mostly by recovering REM (recall 0.37 → 0.81).
+On Michelle's Rat6 scoring its commonest error is quiet WAKE with slow waves
+called NREM (a third of the pre session's WAKE), since only REM is gated on
+movement.
 
 Generate labels for a folder:
 
 ```bash
-python buzsaki_score.py --lfp_folder /path/to/LFP_Output   # writes buzsaki_states.npz
-python buzsaki_score.py --lfp_folder ... --model none      # thresholds, ignoring any fitted model
+python buzsaki_score.py --lfp_folder /path/to/LFP_Output   # the default fitted model
+python buzsaki_score.py --lfp_folder ... --model none      # the threshold scorer
 ```
 
 ### Seeing the labels in the editor
@@ -274,8 +309,8 @@ python buzsaki_score.py --lfp_folder ... --model none      # thresholds, ignorin
 The state editor shows an **extra colour bar** (`W`/`N`/`I`/`R`) above the manual state bar
 whenever auto-labels are supplied — it pans and zooms in lock-step with everything else,
 so you can score by hand while comparing against the automatic labels. The setup GUI's
-**"Show Buzsáki auto-score"** checkbox loads `buzsaki_states.npz` from the LFP/output
-folder if present, or computes it on launch. Programmatically:
+**"Show the auto-score"** checkbox computes it on launch with the scorer picked in the
+**Scorer** dropdown. Programmatically:
 
 ```python
 StateEditor(..., auto_states=states, auto_states_ts=timestamps)
@@ -283,12 +318,12 @@ StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 
 ## Fitting the auto-scorer to your own scoring
 
-> **Opt-in, and it did not transfer.** A model fitted to one hand-scored
+> **Validate across sessions.** An earlier model fitted to one hand-scored
 > session of one rat scored that session well (κ 0.82 held out) but did **not**
-> work on other recordings. The threshold scorer above, with the published
-> parameters, is the default; a fitted model is used only when you ask for it
-> (`--model auto`, or `--model <path>`). Treat what follows as a tool to try
-> once you have several sessions scored, not as the normal path.
+> work on other recordings. The default model is fitted to two sessions and
+> checked on each with the other held out (see
+> [the default model](#automatic-scoring-the-default-model)); judge any refit
+> the same way.
 
 `fit_auto_score.py` replaces those hand-set cutoffs with boundaries *fitted* to
 sessions you scored yourself — a Gaussian model per state plus the transition
@@ -325,9 +360,10 @@ Sessions are stacked for fitting, but each one's features are z-scored within
 that session (so electrode gain cancels) and state transitions are counted only
 *within* a session — otherwise the join between two recordings is read as a
 state change the animal made, which taught the model an impossible REM→NREM
-transition. Nothing picks that file up
-by itself: pass `--model auto` (or the path) to score with it, and the threshold
-multipliers then no longer apply. Repeat
+transition. Score with the written file via `--model auto` (or the path), or
+copy it over `models/sleep_score_model.npz` to make it the default; the
+threshold multipliers do not apply to a model. `--labels` takes an `.npz`, a
+`-states.mat`, or a scorer's name saved in the folder's session NWB. Repeat
 `--lfp_folder`/`--labels` to fit several sessions at once, which is the better
 way to use it — one session teaches it that session's electrodes.
 
@@ -408,8 +444,9 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `setup_gui.py` | Tkinter setup launcher — port of `Sleep_score_HM_neuron.m` |
 | `state_editor.py` | Matplotlib state editor — port of `TheStateEditor.m` (+ auto-label panel) |
 | `processing.py` | Preprocessing + multitaper spectrogram (reads LFP from NWB or `.npy`) |
-| `buzsaki_score.py` | Buzsáki auto sleep scoring (WAKE/NREM/REM) → `buzsaki_states.npz` |
+| `buzsaki_score.py` | Auto sleep scoring: the default fitted model, or Buzsáki thresholds (WAKE/NREM/REM) |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
+| `models/sleep_score_model.npz` | The default model (Michelle's Rat6 20260720 pre + post scoring) |
 | `sleep_nwb_store.py` | Session NWB I/O — the recording in, each scoring out |
 | `import_labels.py` | Put `results/` scorings into the session NWB |
 | `isolate_labels.py` | Take scorings back out (student copy + ground truth) |

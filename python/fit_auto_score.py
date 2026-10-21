@@ -59,8 +59,10 @@ Usage::
 
 Intermediate is fitted whenever the labels contain enough of it
 (``MIN_INTER_BINS``); ``--no_intermediate`` fits WAKE/NREM/REM only. Writes
-``sleep_score_model.npz`` next to the first LFP folder (or ``--out``), which
-:mod:`buzsaki_score` picks up automatically on its next run.
+``sleep_score_model.npz`` next to the first LFP folder (or ``--out``).
+:mod:`buzsaki_score` scores with it when asked (``--model auto`` or the path);
+writing it over ``python/models/sleep_score_model.npz`` makes it the default
+model that every session is scored with.
 """
 
 from __future__ import annotations
@@ -217,12 +219,16 @@ def features_from_lfp_output(lfp_dir, fs=None, channel=None, sr_channel=None):
 # ---------------------------------------------------------------------------- #
 #  Manual labels
 # ---------------------------------------------------------------------------- #
-def load_manual(path):
-    """Load a hand scoring (.npz from the editor, or MATLAB -states.mat).
+def load_manual(path, lfp_dir=None):
+    """Load a hand scoring: a .npz from the editor, a MATLAB -states.mat, or —
+    when ``path`` is not a file — the scoring saved under that scorer's name in
+    ``lfp_dir``'s session NWB.
 
     Returns ``(states, timestamps)``; timestamps are bin starts in seconds.
     """
     path = Path(path)
+    if not path.is_file() and lfp_dir is not None:
+        return _load_nwb_scoring(lfp_dir, str(path))
     if path.suffix.lower() == ".mat":
         from scipy.io import loadmat
         m = loadmat(str(path))
@@ -234,6 +240,25 @@ def load_manual(path):
         ts = (np.asarray(d["timestamps"]).ravel().astype(float)
               if "timestamps" in d.files else np.arange(states.size, dtype=float))
     return states, ts
+
+
+def _load_nwb_scoring(lfp_dir, scorer):
+    """``scorer``'s scoring from the session NWB in ``lfp_dir``.
+
+    Checked by name first: ``read_scoring`` falls back to the newest scoring
+    when the name is missing, which here would fit someone else's labels.
+    """
+    import sleep_nwb_store as snwb
+    nwb = snwb.find_session_nwb(lfp_dir)
+    if nwb is None:
+        raise FileNotFoundError(f"{scorer!r} is not a file, and {lfp_dir} has no "
+                                f"session NWB to read a scoring from")
+    names = [e.get("scorer") for e in snwb.list_scorings(nwb)]
+    if scorer not in names:
+        raise ValueError(f"{nwb.name} has no scoring by {scorer!r} "
+                         f"(it has: {', '.join(map(str, names)) or 'none'})")
+    states, ts, _ = snwb.read_scoring(nwb, scorer=scorer)
+    return np.asarray(states).ravel().astype(int), np.asarray(ts).ravel().astype(float)
 
 
 def align_labels(states, label_ts, times):
@@ -542,7 +567,8 @@ def main():
     ap.add_argument("--lfp_folder", action="append", required=True,
                     help="LFP_Output folder of a hand-scored session.")
     ap.add_argument("--labels", action="append", required=True,
-                    help="Its manual scoring (.npz from the editor, or -states.mat).")
+                    help="Its manual scoring: .npz from the editor, -states.mat, or "
+                         "the name of a scorer saved in the folder's session NWB.")
     ap.add_argument("--channel", type=int, default=None,
                     help="Cortex channel (default: sleep_channels.npy, else the first).")
     ap.add_argument("--sr_channel", type=int, default=None,
@@ -575,7 +601,7 @@ def main():
     for folder, labels in zip(args.lfp_folder, args.labels):
         t, X, (ch, sr_ch) = features_from_lfp_output(
             folder, fs=args.fs, channel=args.channel, sr_channel=args.sr_channel)
-        states, lts = load_manual(labels)
+        states, lts = load_manual(labels, folder)
         y = align_labels(states, lts, t)
         y[y == 2] = WAKE                      # legacy drowsy code folds into WAKE
         counts = {c: int((y == c).sum()) for c in (WAKE, NREM, INTER, REM)}
@@ -649,8 +675,9 @@ def main():
         pfx = output_prefix(args.lfp_folder[0])
         out = str(Path(args.lfp_folder[0]) / f"{pfx}{DEFAULT_MODEL}")
     save_model(model, out)
-    print(f"\nSaved {out}\n  Nothing uses it by itself — score with it via "
-          f"`buzsaki_score.py --lfp_folder <dir> --model auto` (or a path).")
+    print(f"\nSaved {out}\n  Score with it via `buzsaki_score.py --lfp_folder <dir> "
+          f"--model auto` (or the path); copy it over\n  {bz.DEFAULT_MODEL_PATH} "
+          f"to make it the default for every session.")
 
 
 if __name__ == "__main__":

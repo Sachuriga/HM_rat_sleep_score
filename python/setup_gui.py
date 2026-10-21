@@ -38,6 +38,12 @@ MOTION_MODES = {
 EMG_CANDIDATES = ["motion.npy", "emg_rms.npy", "emg_data.npy",
                   "theta_delta_ratio.npy"]
 
+# auto-scorer dropdown -> buzsaki_score.score_from_lfp_output(model=...)
+SCORERS = {
+    "Fitted model (default)": "default",
+    "Thresholds (Buzsáki)": None,
+}
+
 # sleep_channels.npy holds the per-rat tetrodes from SLEEP_CHANNELS_<rat> in
 # hm_tracker_paths.txt, keyed by Buzsáki role. These are the three channels the
 # scorer should look at, in this order, shown under these display names.
@@ -369,8 +375,8 @@ class SetupGUI(QMainWindow):
         v.addWidget(c2)
 
         # ============ Card 3: auto-scoring ================================
-        c3, box3 = self._card(3, "Auto-scoring (Buzsáki)", "optional")
-        self.buzsaki_chk = QCheckBox("Show Buzsáki auto-score in the editor (recomputes on open)")
+        c3, box3 = self._card(3, "Auto-scoring", "optional")
+        self.buzsaki_chk = QCheckBox("Show the auto-score in the editor (recomputes on open)")
         self.buzsaki_chk.setChecked(True)
         self.buzsaki_chk.toggled.connect(self._toggle_thresholds)
         box3.addWidget(self.buzsaki_chk)
@@ -385,6 +391,22 @@ class SetupGUI(QMainWindow):
         box3.addWidget(self.seed_auto_chk)
 
         import buzsaki_score as _bz
+        scorer_row = QHBoxLayout()
+        scorer_row.addWidget(self._field_label("Scorer"))
+        self.scorer_combo = QComboBox()
+        for label, model in SCORERS.items():
+            self.scorer_combo.addItem(label, model)
+        self.scorer_combo.setToolTip(
+            "Fitted model: WAKE/NREM/intermediate/REM, fitted to Michelle's scoring "
+            "of Rat6 pre + post — agreed with her at kappa 0.81-0.87 on the session "
+            "it was not fitted to, against 0.61-0.77 for the thresholds.\n"
+            "Thresholds: the published Buzsáki cutoffs (WAKE/NREM/REM), tuned with "
+            "the multipliers below.")
+        self.scorer_combo.currentIndexChanged.connect(
+            lambda _: self._toggle_thresholds(self.buzsaki_chk.isChecked()))
+        scorer_row.addWidget(self.scorer_combo, 1)
+        box3.addLayout(scorer_row)
+
         self.thr_grid = QGridLayout()
         self.thr_grid.setHorizontalSpacing(12)
         self.thr_grid.setVerticalSpacing(4)
@@ -414,12 +436,12 @@ class SetupGUI(QMainWindow):
             self.thr_grid.addWidget(edit, 1, i, Qt.AlignmentFlag.AlignHCenter)
         box3.addLayout(self.thr_grid)
         box3.addWidget(self._hint(
-            "1.0 = automatic threshold  ·  ↓SW → more NREM  ·  ↓θ → more REM  ·  ↑EMG → laxer REM gate"))
+            "Thresholds only: 1.0 = automatic threshold  ·  ↓SW → more NREM  ·  "
+            "↓θ → more REM  ·  ↑EMG → laxer REM gate"))
         box3.addWidget(self._hint(
-            "These thresholds are the published Buzsáki ones. A model fitted to "
-            "your own scoring (fit_auto_score.py) is not used here — it needs "
-            "buzsaki_score.py --model, since one fitted to a single session did "
-            "not transfer to other recordings."))
+            "The fitted model was trained on one rat (Rat6, one day) — on another "
+            "rat, check it against some hand scoring before relying on it."))
+        self._toggle_thresholds(self.buzsaki_chk.isChecked())
         v.addWidget(c3)
         v.addStretch(1)
 
@@ -465,9 +487,12 @@ class SetupGUI(QMainWindow):
         return line
 
     def _toggle_thresholds(self, on):
-        for e in (self.swf_edit, self.thf_edit, self.emgf_edit,
-                  self.minsec_edit):
-            e.setEnabled(on)
+        # the multipliers only mean something to the threshold scorer
+        thresholds = on and self.scorer_combo.currentData() is None
+        for e in (self.swf_edit, self.thf_edit, self.emgf_edit):
+            e.setEnabled(thresholds)
+        self.minsec_edit.setEnabled(on)
+        self.scorer_combo.setEnabled(on)
         self.seed_auto_chk.setEnabled(on)   # nothing to seed from without it
 
     def _update_ready(self):
@@ -927,9 +952,11 @@ class SetupGUI(QMainWindow):
                   emg_factor=_f(self.emgf_edit, 1.0),
                   min_secs=_f(self.minsec_edit, 10.0))
         try:
-            self._set_status("Computing Buzsáki auto-score ...", "#0000aa")
+            self._set_status("Computing auto-score ...", "#0000aa")
             res, ch = bz.score_from_lfp_output(self.lfp_folder, channel=chs[0],
-                                               fs=eeg_fs, **kw)
+                                               fs=eeg_fs,
+                                               model=self.scorer_combo.currentData(),
+                                               **kw)
             scorer = res.get("model") or "threshold scorer"
             # Into the session NWB, beside the manual scorings but in its own
             # container — so it is never offered in the "Reload state scored by"

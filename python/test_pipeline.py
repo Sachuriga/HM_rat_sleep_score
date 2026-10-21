@@ -102,6 +102,17 @@ assert sanitize_states([0, 1, 2, 3, 4, 5]).tolist() == [0, 1, 1, 3, 4, 5]
 assert KEY_TO_STATE == {"1": 1, "2": 0, "3": 3, "4": 4, "5": 5}   # key = code; 2 erases
 print("Buzsáki 3-state clustering + legacy-code mapping ok")
 
+# The default scorer is the model shipped in python/models/: it has to load and
+# decode a feature matrix into HM state codes; model=None is the threshold scorer.
+import fit_auto_score as fa
+mdl, _ = bz._resolve_model("default", TMP)
+assert mdl is not None, f"default model missing: {bz.DEFAULT_MODEL_PATH}"
+assert list(mdl["features"]) == list(fa.FEATURES)
+pred = fa.predict(mdl, rng.standard_normal((300, len(fa.FEATURES))))
+assert set(np.unique(pred).tolist()) <= {bz.WAKE, bz.NREM, fa.INTER, bz.REM}
+assert bz._resolve_model(None, TMP) == (None, None)
+print("default fitted model ok")
+
 # Resuming a scored file: the scorer name comes from the file (no prompt) and
 # saving updates that same file instead of writing a new one.
 import glob, tempfile
