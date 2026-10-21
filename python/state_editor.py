@@ -287,7 +287,7 @@ class StateEditor:
         self.results_path = None
         self.n_ch = len(specs)
         self.chs = list(chs) if chs is not None else list(range(1, self.n_ch + 1))
-        # Anatomical panel names (cortex / EEG / pyr) resolved from
+        # Anatomical panel names (cortex / EEG / hippocampus) resolved from
         # SLEEP_CHANNELS_<rat>; falls back to the bare channel number.
         self.ch_labels = self._resolve_ch_labels(ch_labels)
         self.to = np.asarray(to, dtype=float)
@@ -364,7 +364,7 @@ class StateEditor:
     def _resolve_ch_labels(self, ch_labels):
         """One display name per scored channel.
 
-        ``ch_labels`` comes from SLEEP_CHANNELS_<rat> (cortex / EEG / pyr). Any
+        ``ch_labels`` comes from SLEEP_CHANNELS_<rat> (cortex / EEG / hippocampus). Any
         slot without a name — no config, or a channel the user typed over —
         falls back to ``Ch <n>`` so a panel is never left unidentified.
         """

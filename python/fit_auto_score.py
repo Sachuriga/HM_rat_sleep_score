@@ -17,16 +17,16 @@ the session so electrode gain cancels:
     sw          z(log delta 0.5-4) - z(log gamma 40-100)   cortex   NREM
     thdelta     log theta 5-10 - log delta 0.5-4           cortex   REM
     hf          log power 275-500 Hz                       cortex   WAKE / muscle
-    ripple      log 100-200 Hz minus log 1-100 Hz          SR       WAKE, arousals
-    spindle     log 10-16 Hz minus log 1-100 Hz            SR       intermediate
-    spindle_hi  log power 13-18 Hz                         SR       intermediate vs REM
-    sr_thdelta  log theta 5-10 - log delta 0.5-4           SR       REM
+    ripple      log 100-200 Hz minus log 1-100 Hz          HPC      WAKE, arousals
+    spindle     log 10-16 Hz minus log 1-100 Hz            HPC      intermediate
+    spindle_hi  log power 13-18 Hz                         HPC      intermediate vs REM
+    sr_thdelta  log theta 5-10 - log delta 0.5-4           HPC      REM
     amp_cv      CV of the 1-30 Hz envelope within a second cortex   REM is steady
 
 ``hf`` and ``ripple`` are muscle tone and arousal read off the LFP's own
 high-frequency content (the EMG-from-LFP idea): ``hf`` separates WAKE from sleep
 as well as the recorded EMG (AUC 0.96) and better than the accelerometer (0.89),
-and needs no extra file. ``ripple`` adds the 100-200 Hz band of the SR channel,
+and needs no extra file. ``ripple`` adds the 100-200 Hz band of the hippocampus channel,
 whose wake-to-sleep contrast is the widest of any band we measured (1.3 log
 units, against 0.8 on cortex); it is what gets the arousal *after REM* right,
 taking that recall from 0.53 to 0.64 and the share of REM epochs ending in WAKE
@@ -41,8 +41,8 @@ emission fits badly, and log-transforming it or applying it as a post-decode
 arousal override both came out neutral-to-worse. The arousals the model misses
 are not high-burst seconds — they are genuinely weak ones.
 
-The two spindle features are what find **intermediate sleep**. On the stratum
-radiatum channel, relative to broadband, intermediate sits ~8 dB above both
+The two spindle features are what find **intermediate sleep**. On the hippocampus
+channel, relative to broadband, intermediate sits ~8 dB above both
 NREM and REM right across 9-13 Hz (AUC 0.97 against everything else). The
 lower slice detects it; the higher 13-18 Hz slice is what keeps it distinct
 from REM, which it otherwise runs into (AUC 0.88 vs 0.87). Intermediate is also
@@ -139,8 +139,8 @@ def amplitude_cv(lfp, fs, n_bins):
 def extract_features(lfp, fs, sr_lfp=None):
     """Per-1 s-bin feature matrix. Returns ``(times, X)``, columns = ``FEATURES``.
 
-    ``lfp`` is the cortex channel; ``sr_lfp`` the stratum radiatum channel,
-    which supplies the spindle and SR theta features. Without it they come from
+    ``lfp`` is the cortex channel; ``sr_lfp`` the hippocampus channel (the ``pyr`` role),
+    which supplies the spindle, ripple and hippocampal theta features. Without it they come from
     the cortex channel too — workable, but intermediate sleep is much harder to
     see there (spindle AUC 0.78 against 0.97).
     """
@@ -186,8 +186,9 @@ def extract_features(lfp, fs, sr_lfp=None):
 def features_from_lfp_output(lfp_dir, fs=None, channel=None, sr_channel=None):
     """Feature matrix for an LFP_Output folder. Returns ``(times, X, channels)``.
 
-    Channels default to the cortex and stratum radiatum tetrodes in
-    ``sleep_channels.npy``; without that file one channel supplies everything.
+    Channels default to the cortex and hippocampus tetrodes of the session's
+    sleep channels — the ``cortex`` and ``pyr`` roles (``sr`` is the EEG, which
+    is not used); without them one channel supplies everything.
     """
     from processing import (find_lfp_source, load_lfp_channel,
                             detect_sampling_rate, find_output, LFP_FS_MAX)
@@ -208,7 +209,7 @@ def features_from_lfp_output(lfp_dir, fs=None, channel=None, sr_channel=None):
     if channel is None or sr_channel is None:
         sc, _ = load_sleep_channels(lfp_dir)
         channel = channel if channel is not None else sc.get("cortex")
-        sr_channel = sr_channel if sr_channel is not None else sc.get("sr")
+        sr_channel = sr_channel if sr_channel is not None else sc.get("pyr")
     if channel is None:
         channel = src["channels"][0]
     sr_lfp = load_lfp_channel(src, sr_channel) if sr_channel is not None else None
@@ -572,8 +573,9 @@ def main():
     ap.add_argument("--channel", type=int, default=None,
                     help="Cortex channel (default: sleep_channels.npy, else the first).")
     ap.add_argument("--sr_channel", type=int, default=None,
-                    help="Stratum radiatum channel — supplies the spindle features "
-                         "(default: sleep_channels.npy).")
+                    help="Hippocampus channel — supplies the spindle, ripple and "
+                         "hippocampal theta features (default: the pyr role of the "
+                         "session's sleep channels).")
     ap.add_argument("--fs", type=float, default=None, help="LFP sampling rate (Hz).")
     ap.add_argument("--out", default=None,
                     help=f"Model file (default: <first lfp_folder>/<prefix>{DEFAULT_MODEL}).")
@@ -605,11 +607,12 @@ def main():
         y = align_labels(states, lts, t)
         y[y == 2] = WAKE                      # legacy drowsy code folds into WAKE
         counts = {c: int((y == c).sum()) for c in (WAKE, NREM, INTER, REM)}
-        print(f"{Path(folder).name}: cortex ch {ch}, SR ch {sr_ch}, {len(t)} bins "
+        print(f"{Path(folder).name}: cortex ch {ch}, hippocampus ch {sr_ch}, "
+              f"{len(t)} bins "
               f"({', '.join(f'{STATE_NAMES[c]} {n}' for c, n in counts.items())})")
         if sr_ch is None:
-            print("  note: no SR channel — the spindle features come from the cortex "
-                  "channel, where intermediate sleep is much harder to see")
+            print("  note: no hippocampus channel — the spindle features come from "
+                  "the cortex channel, where intermediate sleep is much harder to see")
         Xs.append(X)
         ys.append(y)
 

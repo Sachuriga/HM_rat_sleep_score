@@ -128,7 +128,7 @@ as its primary output — it is where the per-sample data lives:
 | `acquisition/emg_from_lfp` | the EMG-from-LFP export (5 Hz) |
 | `acquisition/motion` | the accelerometer export |
 | `processing/sleep/awakeness`, `emg_rms`, `theta_delta_ratio` | derived per-sample signals |
-| `processing/sleep/sleep_channels` | per-rat cortex / sr / pyr tetrodes |
+| `processing/sleep/sleep_channels` | per-rat cortex / sr (EEG) / pyr (hippocampus) tetrodes |
 | `processing/sleep/session_info` | channel map, session boundaries, EMG channel, SNR |
 
 Steps **w** (behaviour/trials) and **u** (units) then *append* to that same
@@ -230,12 +230,14 @@ model per state over eight LFP features, decoded with Viterbi (see
 scores WAKE / NREM / intermediate / REM from the LFP alone.
 
 It was fitted to Michelle's hand scoring of **Rat6 20260720, pre (1.9 h) and
-post (4 h)**. Fitted on one of the two and scored on the other:
+post (4 h)**, from cortex NT6 and hippocampus NT14 — the `cortex` and `pyr`
+roles of the sleep channels. The `sr` role is the EEG (NT12 on Rat6), which the
+model does not use. Fitted on one of the two sessions and scored on the other:
 
 | held-out session | κ WAKE/NREM/REM | κ with intermediate | recall WAKE / NREM / INTER / REM |
 |---|---|---|---|
-| pre  | 0.81 | 0.81 | 0.90 / 0.90 / 0.65 / 0.97 |
-| post | 0.87 | 0.85 | 0.90 / 0.98 / 0.37 / 0.90 |
+| pre  | 0.83 | 0.83 | 0.92 / 0.90 / 0.84 / 0.88 |
+| post | 0.87 | 0.85 | 0.89 / 0.98 / 0.43 / 0.91 |
 
 For comparison on the same labels: the threshold scorer below gets κ 0.61
 (pre) and 0.77 (post), and two people scoring the pre session agree at κ 0.80.
@@ -251,11 +253,14 @@ more sessions are scored, refit on all of them and overwrite the model —
 labels can be read straight out of each session NWB by scorer name:
 
 ```bash
-python fit_auto_score.py \
+python fit_auto_score.py --channel 6 --sr_channel 14 \
     --lfp_folder <Rat_HM_Neuron>/pre/Rat6/20260720  --labels Michelle \
     --lfp_folder <Rat_HM_Neuron>/post/Rat6/20260720 --labels Michelle \
     --out models/sleep_score_model.npz
 ```
+
+Without `--channel` / `--sr_channel` the channels come from each session's
+sleep channels (`cortex`, `pyr`).
 
 The setup GUI's **Scorer** dropdown picks the model (default) or the threshold
 scorer; on the command line, `--model none` gives the thresholds.
@@ -375,10 +380,10 @@ Eight features per 1 s bin, each smoothed 15 s then z-scored within the session
 | `sw` | z(log δ 0.5–4) − z(log γ 40–100), cortex | NREM |
 | `thdelta` | log θ 5–10 − log δ 0.5–4, cortex | REM (AUC 0.99 vs NREM, against 0.89 for the 5–10/2–16 ratio) |
 | `hf` | log 275–500 Hz, cortex | WAKE (AUC 0.96, vs 0.96 for recorded EMG and 0.89 for the accelerometer) |
-| `ripple` | log 100–200 Hz − log 1–100 Hz, stratum radiatum | WAKE and **arousals** — the widest wake-to-sleep contrast of any band measured (1.3 log units on SR, 0.8 on cortex) |
-| `spindle` | log 10–16 Hz − log 1–100 Hz, stratum radiatum | **intermediate** (AUC 0.97 vs everything else) |
-| `spindle_hi` | log 13–18 Hz, stratum radiatum | intermediate vs REM (AUC 0.88) |
-| `sr_thdelta` | log θ 5–10 − log δ 0.5–4, stratum radiatum | REM |
+| `ripple` | log 100–200 Hz − log 1–100 Hz, hippocampus | WAKE and **arousals** — the widest wake-to-sleep contrast of any band measured (1.3 log units on hippocampus, 0.8 on cortex) |
+| `spindle` | log 10–16 Hz − log 1–100 Hz, hippocampus | **intermediate** (AUC 0.97 vs everything else) |
+| `spindle_hi` | log 13–18 Hz, hippocampus | intermediate vs REM (AUC 0.88) |
+| `sr_thdelta` | log θ 5–10 − log δ 0.5–4, hippocampus | REM |
 | `amp_cv` | CV of the 1–30 Hz envelope within each second, cortex | REM, which holds a steadier amplitude than any other state (AUC 0.88 vs intermediate); lifts REM precision 0.81 → 0.90 |
 
 Intermediate sleep is fitted whenever the labels contain at least
@@ -415,7 +420,7 @@ penalty `INTER_BIAS`. Both are stored in the model file and adjustable
 A REM epoch ends in an arousal — in this scoring all six do, and REM never runs
 straight into NREM. Two things were needed before the auto-score agreed:
 
-- the **`ripple` feature** (100–200 Hz on the SR channel). It rises at every REM
+- the **`ripple` feature** (100–200 Hz on the hippocampus channel). It rises at every REM
   offset, and adding it took the recall of those post-REM arousals from 0.53 to
   0.64, REM recall from 0.85 to 0.87, and κ from 0.819 to 0.822.
 - **protecting that arousal** from min-duration smoothing

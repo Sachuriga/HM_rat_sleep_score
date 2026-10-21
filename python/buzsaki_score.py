@@ -27,8 +27,9 @@ States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 Two scorers live here, and **the default is the fitted model** shipped in
 ``models/sleep_score_model.npz`` (see ``fit_auto_score.py``), not this
 threshold scorer. It was fitted to Michelle's hand scoring of Rat6 20260720,
-pre and post together. Held out one session at a time it agrees with her at
-kappa 0.81 (pre) / 0.87 (post) on WAKE/NREM/REM, against 0.61 / 0.77 for the
+pre and post together, from cortex NT6 + hippocampus NT14 (the cortex and pyr
+roles; the EEG is not used). Held out one session at a time it agrees with her
+at kappa 0.83 (pre) / 0.87 (post) on WAKE/NREM/REM, against 0.61 / 0.77 for the
 thresholds below — whose histogram dips land in different places in the two
 sessions even though each state's metric values barely move. Two people
 scoring the pre session agree at 0.80. Both sessions are one rat on one day,
@@ -121,7 +122,7 @@ def _channel_metrics(lfp, fs):
       lifts both terms and cancels). High in NREM; low in theta-dominated REM
       and in desynchronised, gamma-rich WAKE. Cleanest from a CORTEX channel.
     * ``thratio`` — narrow-band theta power ratio, power(5–10 Hz) /
-      power(2–16 Hz) (Watson et al. 2016). Strongest from a STRATUM RADIATUM
+      power(2–16 Hz) (Watson et al. 2016). Strongest from a HIPPOCAMPUS
       channel (theta peaks there in REM).
     * ``hf`` — log power in ``HF_BAND``, muscle tone read off the LFP's own
       high-frequency tail. Separates WAKE from sleep as well as a recorded EMG
@@ -149,7 +150,7 @@ def compute_metrics(lfp, fs, emg=None, emg_ts=None, theta_lfp=None):
 
     ``lfp`` provides the slow-wave and high-frequency metrics — use a **cortex**
     channel. ``theta_lfp`` (optional) provides the theta metric — use a
-    **stratum radiatum** channel where theta peaks; if omitted, theta is taken
+    **hippocampus** channel (the ``pyr`` role) where theta peaks; if omitted, theta is taken
     from ``lfp`` too (single-channel mode). ``emg`` + ``emg_ts`` is the
     EMG-from-LFP; when it is missing, ``hf`` stands in as the movement signal.
     """
@@ -328,7 +329,7 @@ def score(lfp, fs, emg=None, emg_ts=None, motion=None, motion_ts=None, min_secs=
     """Full Buzsáki auto-scoring. Returns a dict with states, timestamps, metrics.
 
     ``lfp`` = slow-wave (cortex) channel; ``theta_lfp`` = optional theta
-    (stratum radiatum) channel — pass both for layer-specific scoring. REM is
+    (hippocampus) channel — pass both for layer-specific scoring. REM is
     gated on movement quiescence, measured from ``emg`` (EMG-from-LFP) and/or
     ``motion`` (accelerometer); when neither is given the channel's own
     high-frequency power stands in, so the gate is never simply absent.
@@ -455,7 +456,8 @@ def _load_motion(lfp_dir, fs):
 
 
 # The model every session is scored with unless told otherwise: fitted to
-# Michelle's scoring of Rat6 20260720 pre + post (fit_auto_score.py). Refit and
+# Michelle's scoring of Rat6 20260720 pre + post, cortex NT6 + hippocampus NT14
+# (fit_auto_score.py). Refit and
 # overwrite it as more sessions are hand-scored.
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "sleep_score_model.npz"
 
@@ -485,8 +487,9 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
     """Run the pipeline on an LFP_Output folder. Returns (result, channel_used).
 
     Layer-specific channels (recommended, per-rat): ``ctx_channel`` (cortex) drives
-    the slow-wave/NREM metric, ``sr_channel`` (stratum radiatum) drives the
-    theta/REM metric. If only ``channel`` (or none) is given, a single channel
+    the slow-wave/NREM metric, ``sr_channel`` (hippocampus — the ``pyr`` role
+    of SLEEP_CHANNELS) drives the theta/REM metric. The ``sr`` role is the EEG,
+    which neither scorer reads. If only ``channel`` (or none) is given, a single channel
     drives both (legacy behaviour). Channel numbers are 1-based tetrode numbers
     (channels_npy) or 1-based columns (lfp_data.npy), per find_lfp_source.
 
@@ -524,23 +527,24 @@ def score_from_lfp_output(lfp_dir, channel=None, ctx_channel=None,
             fs = None
         fs = fs or 1500.0
 
-    # Auto-load per-rat cortex/sr tetrodes saved by the tracker (SLEEP_CHANNELS_<rat>)
-    # unless the caller passed them explicitly.
+    # Auto-load per-rat cortex / hippocampus tetrodes saved by the tracker
+    # (SLEEP_CHANNELS_<rat>) unless the caller passed them explicitly. In those
+    # roles pyr is the hippocampus and sr the EEG; the EEG is not scored from.
     if ctx_channel is None and sr_channel is None:
         from processing import load_sleep_channels
         sc, sc_src = load_sleep_channels(lfp_dir)
         if sc:
             ctx_channel = sc.get("cortex")
-            sr_channel = sc.get("sr")
-            print(f"  using SLEEP_CHANNELS: cortex={ctx_channel} sr={sr_channel} "
-                  f"pyr={sc.get('pyr')}  (from {sc_src})")
+            sr_channel = sc.get("pyr")
+            print(f"  using SLEEP_CHANNELS: cortex={ctx_channel} "
+                  f"hippocampus(pyr)={sr_channel}  (from {sc_src})")
 
     sw_ch = ctx_channel if ctx_channel is not None else (
         channel if channel is not None else src["channels"][0])
     lfp = load_lfp_channel(src, sw_ch)
     theta_lfp = load_lfp_channel(src, sr_channel) if sr_channel is not None else None
     if sr_channel is not None:
-        print(f"  slow-wave from cortex ch {sw_ch}, theta from SR ch {sr_channel}")
+        print(f"  slow-wave from cortex ch {sw_ch}, theta from hippocampus ch {sr_channel}")
 
     fitted, model_name = _resolve_model(model, lfp_dir)
     if fitted is not None:

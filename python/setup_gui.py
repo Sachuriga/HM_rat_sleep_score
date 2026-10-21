@@ -47,7 +47,7 @@ SCORERS = {
 # sleep_channels.npy holds the per-rat tetrodes from SLEEP_CHANNELS_<rat> in
 # hm_tracker_paths.txt, keyed by Buzsáki role. These are the three channels the
 # scorer should look at, in this order, shown under these display names.
-SLEEP_ROLE_LABELS = [("cortex", "cortex"), ("sr", "EEG"), ("pyr", "pyr")]
+SLEEP_ROLE_LABELS = [("cortex", "cortex"), ("sr", "EEG"), ("pyr", "hippocampus")]
 
 # --- Apple-style palette (light) -------------------------------------------
 ACCENT = "#007AFF"     # systemBlue
@@ -398,7 +398,7 @@ class SetupGUI(QMainWindow):
             self.scorer_combo.addItem(label, model)
         self.scorer_combo.setToolTip(
             "Fitted model: WAKE/NREM/intermediate/REM, fitted to Michelle's scoring "
-            "of Rat6 pre + post — agreed with her at kappa 0.81-0.87 on the session "
+            "of Rat6 pre + post — agreed with her at kappa 0.83-0.87 on the session "
             "it was not fitted to, against 0.61-0.77 for the thresholds.\n"
             "Thresholds: the published Buzsáki cutoffs (WAKE/NREM/REM), tuned with "
             "the multipliers below.")
@@ -556,7 +556,7 @@ class SetupGUI(QMainWindow):
             f"{dur:.1f} s ({dur / 60:.1f} min){rate_note}")
 
     def _prefill_sleep_channels(self, folder):
-        """Fill the three channel boxes with this rat's cortex / EEG / pyr tetrodes.
+        """Fill the three channel boxes with this rat's cortex / EEG / hippocampus tetrodes.
 
         They come from ``SLEEP_CHANNELS_<rat>`` in hm_tracker_paths.txt: the
         tracker resolves that at step 8 and stores it in the session NWB, and
