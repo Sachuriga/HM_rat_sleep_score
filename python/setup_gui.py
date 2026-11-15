@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFrame,
     QFileDialog, QSizePolicy, QScrollArea, QGraphicsDropShadowEffect,
+    QMessageBox,
 )
 
 from processing import (compute_channel_spectrogram, process_motion,
@@ -310,6 +311,15 @@ class SetupGUI(QMainWindow):
             "Leave on the blank entry to start a fresh scoring.")
         self.prev_combo.currentIndexChanged.connect(self._on_prev_pick)
         prow.addWidget(self.prev_combo, 1)
+        self.del_btn = QPushButton("Delete…")
+        self.del_btn.setObjectName("Browse")
+        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.del_btn.setEnabled(False)
+        self.del_btn.setToolTip(
+            "Delete the scoring picked on the left from the session .nwb — its "
+            "labels and event marks. Asks first; it cannot be undone.")
+        self.del_btn.clicked.connect(self._delete_scoring)
+        prow.addWidget(self.del_btn)
         self.prev_dot = self._dot()
         prow.addWidget(self.prev_dot)
         box.addLayout(prow)
@@ -397,9 +407,9 @@ class SetupGUI(QMainWindow):
         for label, model in SCORERS.items():
             self.scorer_combo.addItem(label, model)
         self.scorer_combo.setToolTip(
-            "Fitted model: WAKE/NREM/intermediate/REM, fitted to Michelle's scoring "
-            "of Rat6 pre + post — agreed with her at kappa 0.83-0.87 on the session "
-            "it was not fitted to, against 0.61-0.77 for the thresholds.\n"
+            "Fitted model: WAKE/NREM/intermediate/REM, fitted to 13 hand-scored "
+            "Rat5 + Rat6 sessions — kappa 0.75-0.89 on a session it was not "
+            "fitted to. Not usable on a recording that is almost all wake.\n"
             "Thresholds: the published Buzsáki cutoffs (WAKE/NREM/REM), tuned with "
             "the multipliers below.")
         self.scorer_combo.currentIndexChanged.connect(
@@ -749,6 +759,7 @@ class SetupGUI(QMainWindow):
         self.prev_combo.setCurrentIndex(0)
         self.prev_combo.blockSignals(False)
         self._set_dot(self.prev_dot, "off")
+        self.del_btn.setEnabled(False)
 
         if not self.lfp_folder:
             self.prev_hint.setText(
@@ -771,10 +782,40 @@ class SetupGUI(QMainWindow):
         self.prev_scoring = (self.scorings[index - 1]
                              if 1 <= index <= len(self.scorings) else None)
         self._set_dot(self.prev_dot, "ok" if self.prev_scoring else "off")
+        self.del_btn.setEnabled(self.prev_scoring is not None)
         if self.prev_scoring:
             self.prev_hint.setText(
                 f"Continuing {self.prev_scoring.get('scorer')}'s scoring — saving "
                 f"updates that entry, and you won't be asked for a name.")
+
+    def _delete_scoring(self):
+        """Delete the scoring picked in the dropdown from the session NWB.
+
+        Asks first, with No as the default: the labels are gone for good.
+        """
+        entry = self.prev_scoring
+        if not entry or not self.nwb_path:
+            return
+        nwb = os.path.basename(self.nwb_path)
+        Btn = QMessageBox.StandardButton
+        reply = QMessageBox.question(
+            self, "Delete scoring",
+            f"Delete this scoring from {nwb}?\n\n    {entry['label']}\n\n"
+            f"Its labels and event marks are removed for good. Other scorers' "
+            f"scorings and the recording are not touched.",
+            Btn.Yes | Btn.No, Btn.No)
+        if reply != Btn.Yes:
+            return
+        import sleep_nwb_store as snwb
+        try:
+            removed = snwb.delete_scoring(self.nwb_path, name=entry["name"])
+        except Exception as exc:
+            return self._set_status(f"Could not delete the scoring: {exc}", ERR)
+        self._reload_scorings()
+        if removed:
+            self._set_status(f"Deleted {removed}'s scoring from {nwb}.", OK_GREEN)
+        else:
+            self._set_status(f"That scoring is no longer in {nwb}.", WARN)
 
     # ------------------------------------------------------------------ launch
     def _launch(self):

@@ -396,6 +396,19 @@ if HAVE_PYNWB:
     assert sorted(e["scorer"] for e in snwb.list_scorings(nwb)) == ["Student", "Tester"]
     print("retyping your own name offers your scoring instead of replacing it")
 
+    # Deleting a scoring removes that scorer's labels and events, nothing else
+    assert snwb.delete_scoring(nwb, scorer="Nobody") is None, \
+        "an unknown name must delete nothing (no falling back to the newest)"
+    assert sorted(e["scorer"] for e in snwb.list_scorings(nwb)) == ["Student", "Tester"]
+    assert snwb.delete_scoring(nwb, scorer="Tester") == "Tester"
+    assert [e["scorer"] for e in snwb.list_scorings(nwb)] == ["Student"]
+    import h5py
+    with h5py.File(nwb, "r") as h5:
+        assert "events_Tester" not in h5["processing/sleep"], "events left behind"
+    st, _, _ = snwb.read_scoring(nwb, scorer="Student", timestamps=to)
+    assert (st == 3).all(), "deleting Tester changed Student's scoring"
+    print("deleting a scoring removes only that scorer's labels and events")
+
 # ---- Closing asks whether to save unsaved changes ---------------------------
 import state_editor as se_mod
 if se_mod._HAVE_QT:

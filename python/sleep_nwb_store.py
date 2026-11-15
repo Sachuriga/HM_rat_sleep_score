@@ -460,6 +460,23 @@ def write_scoring(nwb_path, states, timestamps, scorer, events=None,
         events_desc=f"Event marks placed by {scorer}.")
 
 
+def delete_scoring(nwb_path, scorer=None, name=None):
+    """Remove one scorer's scoring (its states table and event marks) for good.
+
+    Picked by NWB table ``name`` or by ``scorer``. Unlike :func:`read_scoring`
+    there is no falling back to the newest entry — a name that is not in the
+    file deletes nothing. Returns the scorer whose scoring was removed, or
+    None. The automatic scoring is not a scorer's and cannot be removed here.
+    """
+    for entry in list_scorings(nwb_path):
+        if (name and entry["name"] == name) or \
+                (not name and scorer and entry.get("scorer") == scorer):
+            slug = entry["name"][len(STATES_PREFIX):]
+            _h5_delete(nwb_path, [entry["name"], EVENTS_PREFIX + slug])
+            return entry.get("scorer") or slug
+    return None
+
+
 def write_auto_states(nwb_path, states, timestamps, source="buzsaki", extra=None):
     """Store the automatic scoring in the session NWB.
 

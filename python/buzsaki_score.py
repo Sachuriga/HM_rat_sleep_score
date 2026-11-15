@@ -26,14 +26,14 @@ States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 
 Two scorers live here, and **the default is the fitted model** shipped in
 ``models/sleep_score_model.npz`` (see ``fit_auto_score.py``), not this
-threshold scorer. It was fitted to Michelle's hand scoring of Rat6 20260720,
-pre and post together, from cortex NT6 + hippocampus NT14 (the cortex and pyr
-roles; the EEG is not used). Held out one session at a time it agrees with her
-at kappa 0.83 (pre) / 0.87 (post) on WAKE/NREM/REM, against 0.61 / 0.77 for the
-thresholds below — whose histogram dips land in different places in the two
-sessions even though each state's metric values barely move. Two people
-scoring the pre session agree at 0.80. Both sessions are one rat on one day,
-so check it against hand scoring before relying on it for another rat;
+threshold scorer. It was fitted to the hand scoring of 13 pre/post sessions of
+Rat5 and Rat6 (six scorers), from each rat's cortex and pyr sleep channels (the
+EEG is not used). Held out one session at a time it agrees with the scorer at
+kappa 0.75-0.89 with intermediate (0.83 pooled), and fitted on one rat it
+scores the other at 0.69-0.86. Two people scoring the same session agree at
+0.80. It fails on a recording that is almost all wake (kappa 0.13), because
+its features are z-scored within the session. Two rats is still few, so check
+it against hand scoring before relying on it for another rat;
 ``model=None`` (``--model none``) gives the threshold scorer, which needs no
 training at all.
 
@@ -456,8 +456,8 @@ def _load_motion(lfp_dir, fs):
 
 
 # The model every session is scored with unless told otherwise: fitted to
-# Michelle's scoring of Rat6 20260720 pre + post, cortex NT6 + hippocampus NT14
-# (fit_auto_score.py). Refit and
+# the hand scoring of 13 Rat5 + Rat6 pre/post sessions, cortex + pyr sleep
+# channels (fit_auto_score.py). Refit and
 # overwrite it as more sessions are hand-scored.
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "sleep_score_model.npz"
 

@@ -171,6 +171,11 @@ NWB (newest first). It starts blank — nothing is resumed by accident. Pick a
 scorer and their labels load, their name carries through (you are *not* asked
 for a name again), and saving updates that same entry.
 
+**Delete…**, beside the dropdown, removes the picked scoring — its labels and
+event marks — from the NWB. It asks first (No is the default) and cannot be
+undone; other scorers' entries and the recording are untouched. From Python:
+`sleep_nwb_store.delete_scoring(nwb, scorer="Name")`.
+
 ### Keeping ground truth away from students
 
 `isolate_labels.py` splits a session into a label-free copy and the labels
@@ -229,38 +234,52 @@ model per state over eight LFP features, decoded with Viterbi (see
 [Fitting the auto-scorer](#fitting-the-auto-scorer-to-your-own-scoring)). It
 scores WAKE / NREM / intermediate / REM from the LFP alone.
 
-It was fitted to Michelle's hand scoring of **Rat6 20260720, pre (1.9 h) and
-post (4 h)**, from cortex NT6 and hippocampus NT14 — the `cortex` and `pyr`
-roles of the sleep channels. The `sr` role is the EEG (NT12 on Rat6), which the
-model does not use. Fitted on one of the two sessions and scored on the other:
+It was fitted (2026-11-15) to the hand scoring of **13 pre/post sessions of two
+rats** — Rat5 (2) and Rat6 (11), six scorers, 44.6 h — from each rat's `cortex`
+and `pyr` sleep channels (Rat5 NT25 / NT16, Rat6 NT6 / NT14). The `sr` role is
+the EEG (NT12), which the model does not use. Each session scored by a model
+fitted on the other twelve:
 
-| held-out session | κ WAKE/NREM/REM | κ with intermediate | recall WAKE / NREM / INTER / REM |
-|---|---|---|---|
-| pre  | 0.83 | 0.83 | 0.92 / 0.90 / 0.84 / 0.88 |
-| post | 0.87 | 0.85 | 0.89 / 0.98 / 0.43 / 0.91 |
+| held-out | κ with intermediate | κ WAKE/NREM/REM |
+|---|---|---|
+| Rat5 post (20260720, 20260721) | 0.82, 0.81 | 0.83, 0.82 |
+| Rat6 post (6 sessions) | 0.83–0.89 | 0.84–0.90 |
+| Rat6 pre (5 sessions) | 0.75–0.83 | 0.75–0.83 |
+| **all 13, pooled** | **0.83** (accuracy 0.91) | |
 
-For comparison on the same labels: the threshold scorer below gets κ 0.61
-(pre) and 0.77 (post), and two people scoring the pre session agree at κ 0.80.
-Re-tuning the thresholds does not close the gap — tuned on one session they
-score 0.54–0.55 on the other, because each cutoff is a histogram dip found
-afresh per session and the dips move (theta 0.51 in pre, 0.33 in post) while
-each state's own values barely do.
+Held-out recall is 0.85–0.98 for WAKE, 0.88–0.99 for NREM and 0.85–1.00 for
+REM. Intermediate is the weak state, 0.24–0.76: it is mostly called REM or
+NREM (in-sample, 117 of the 189 hand-scored intermediate epochs are found).
+Across rats: fitted on Rat6 alone it scores Rat5 at κ 0.80 and 0.79, and fitted
+on Rat5's two sessions it scores Rat6 at 0.69–0.86. For scale, two people
+scoring Rat6 20260720 pre agree at κ 0.80, and the previous model (Michelle's
+Rat6 20260720 pre + post only) scores a mean κ of 0.81 on these 13 sessions
+against 0.82 held out for this one — the gain is mostly Rat5 20260720
+(0.78 → 0.82).
 
-**One rat, one day.** The two sessions share the rat, the electrodes and the
-day, so this shows transfer between sessions, not between rats. On a new rat,
-compare the auto-score with some hand scoring before relying on it, and as
-more sessions are scored, refit on all of them and overwrite the model —
-labels can be read straight out of each session NWB by scorer name:
+Two scored sessions were left out of the fit:
+
+- **Rat5 20260721 pre** — scored 95% WAKE, and the model gets κ 0.13 on it,
+  calling over 40% of that WAKE sleep. The features are z-scored within the
+  session, which assumes the session holds a usual mix of states; **on a
+  recording that is almost all wake the auto-score is not usable.**
+- **Rat6 20260727 pre** — its REM labels sit on slow-wave, theta-free LFP, and
+  the two people who scored it agree at only κ 0.51.
+
+On a new rat, compare the auto-score with some hand scoring before relying on
+it, and as more sessions are scored, refit on all of them and overwrite the
+model — labels are read straight out of each session NWB by scorer name, and
+the channels come from each session's sleep channels (`cortex`, `pyr`):
 
 ```bash
-python fit_auto_score.py --channel 6 --sr_channel 14 \
+python fit_auto_score.py \
     --lfp_folder <Rat_HM_Neuron>/pre/Rat6/20260720  --labels Michelle \
-    --lfp_folder <Rat_HM_Neuron>/post/Rat6/20260720 --labels Michelle \
+    --lfp_folder <Rat_HM_Neuron>/post/Rat5/20260720 --labels Henri \
+    ... \
     --out models/sleep_score_model.npz
 ```
 
-Without `--channel` / `--sr_channel` the channels come from each session's
-sleep channels (`cortex`, `pyr`).
+`--channel` / `--sr_channel` override the channels, for every session passed.
 
 The setup GUI's **Scorer** dropdown picks the model (default) or the threshold
 scorer; on the command line, `--model none` gives the thresholds.
@@ -325,8 +344,8 @@ StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 
 > **Validate across sessions.** An earlier model fitted to one hand-scored
 > session of one rat scored that session well (κ 0.82 held out) but did **not**
-> work on other recordings. The default model is fitted to two sessions and
-> checked on each with the other held out (see
+> work on other recordings. The default model is fitted to 13 sessions of two
+> rats and checked on each with that session held out (see
 > [the default model](#automatic-scoring-the-default-model)); judge any refit
 > the same way.
 
@@ -451,7 +470,7 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `processing.py` | Preprocessing + multitaper spectrogram (reads LFP from NWB or `.npy`) |
 | `buzsaki_score.py` | Auto sleep scoring: the default fitted model, or Buzsáki thresholds (WAKE/NREM/REM) |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
-| `models/sleep_score_model.npz` | The default model (Michelle's Rat6 20260720 pre + post scoring) |
+| `models/sleep_score_model.npz` | The default model (13 hand-scored pre/post sessions, Rat5 + Rat6) |
 | `sleep_nwb_store.py` | Session NWB I/O — the recording in, each scoring out |
 | `import_labels.py` | Put `results/` scorings into the session NWB |
 | `isolate_labels.py` | Take scorings back out (student copy + ground truth) |
