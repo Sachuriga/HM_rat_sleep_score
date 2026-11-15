@@ -407,8 +407,8 @@ class SetupGUI(QMainWindow):
         for label, model in SCORERS.items():
             self.scorer_combo.addItem(label, model)
         self.scorer_combo.setToolTip(
-            "Fitted model: WAKE/NREM/intermediate/REM, fitted to 13 hand-scored "
-            "Rat5 + Rat6 sessions — kappa 0.75-0.89 on a session it was not "
+            "Fitted model: WAKE/NREM/intermediate/REM, fitted to 16 hand-scored "
+            "Rat1/Rat5/Rat6 sessions — kappa 0.74-0.93 on a session it was not "
             "fitted to. Not usable on a recording that is almost all wake.\n"
             "Thresholds: the published Buzsáki cutoffs (WAKE/NREM/REM), tuned with "
             "the multipliers below.")

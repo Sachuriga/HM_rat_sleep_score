@@ -95,8 +95,8 @@ The setup GUI opens. Steps:
    instead of writing a new one. **Clear** empties the field again.
 6. **Parameters** — sampling rate, session name, motion type, and optional
    auto-scoring. The **Scorer** dropdown defaults to the fitted model in
-   `python/models/` (WAKE/NREM/intermediate/REM, fitted to 13 hand-scored
-   Rat5 + Rat6 pre/post sessions — see
+   `python/models/` (WAKE/NREM/intermediate/REM, fitted to 16 hand-scored
+   Rat1 + Rat5 + Rat6 pre/post sessions — see
    [the default model](python/README.md#automatic-scoring-the-default-model));
    **Thresholds (Buzsáki)** gives the published threshold scorer with
    adjustable multipliers.

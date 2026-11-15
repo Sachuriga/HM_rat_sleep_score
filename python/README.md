@@ -234,37 +234,33 @@ model per state over eight LFP features, decoded with Viterbi (see
 [Fitting the auto-scorer](#fitting-the-auto-scorer-to-your-own-scoring)). It
 scores WAKE / NREM / intermediate / REM from the LFP alone.
 
-It was fitted (2026-11-15) to the hand scoring of **13 pre/post sessions of two
-rats** — Rat5 (2) and Rat6 (11), six scorers, 44.6 h — from each rat's `cortex`
-and `pyr` sleep channels (Rat5 NT25 / NT16, Rat6 NT6 / NT14). The `sr` role is
-the EEG (NT12), which the model does not use. Each session scored by a model
-fitted on the other twelve:
+It was fitted (2026-11-15) to the hand scoring of **16 pre/post sessions of
+three rats** — Rat1 (2), Rat5 (2) and Rat6 (12), seven scorers, 54.8 h — from
+each rat's `cortex` and `pyr` sleep channels (Rat1 NT22 / NT16, Rat5 NT25 /
+NT16, Rat6 NT6 / NT14). The `sr` role is the EEG, which the model does not use.
+Each session scored by a model fitted on the other fifteen:
 
 | held-out | κ with intermediate | κ WAKE/NREM/REM |
 |---|---|---|
-| Rat5 post (20260720, 20260721) | 0.82, 0.81 | 0.83, 0.82 |
-| Rat6 post (6 sessions) | 0.83–0.89 | 0.84–0.90 |
-| Rat6 pre (5 sessions) | 0.75–0.83 | 0.75–0.83 |
-| **all 13, pooled** | **0.83** (accuracy 0.91) | |
+| Rat1 post (20260227, 20260317) | 0.92, 0.93 | 0.92, 0.94 |
+| Rat5 post (20260720, 20260721) | 0.82, 0.82 | 0.83, 0.82 |
+| Rat6 post (6 sessions) | 0.83–0.90 | 0.84–0.91 |
+| Rat6 pre (6 sessions) | 0.74–0.88 | 0.74–0.88 |
+| **all 16, pooled** | **0.85** (accuracy 0.92) | |
 
-Held-out recall is 0.85–0.98 for WAKE, 0.88–0.99 for NREM and 0.85–1.00 for
-REM. Intermediate is the weak state, 0.24–0.76: it is mostly called REM or
-NREM (in-sample, 117 of the 189 hand-scored intermediate epochs are found).
-Across rats: fitted on Rat6 alone it scores Rat5 at κ 0.80 and 0.79, and fitted
-on Rat5's two sessions it scores Rat6 at 0.69–0.86. For scale, two people
-scoring Rat6 20260720 pre agree at κ 0.80, and the previous model (Michelle's
-Rat6 20260720 pre + post only) scores a mean κ of 0.81 on these 13 sessions
-against 0.82 held out for this one — the gain is mostly Rat5 20260720
-(0.78 → 0.82).
+Held-out recall is 0.85–0.98 for WAKE, 0.88–1.00 for NREM and 0.85–1.00 for
+REM. Intermediate is the weak state, 0.26–0.76: it is mostly called REM or
+NREM (in-sample, 134 of the 218 hand-scored intermediate epochs are found).
+Across rats, with a whole rat held out: Rat1 scores κ 0.92 and 0.94, Rat5 0.81
+and 0.81, and Rat6 (fitted on the other four sessions only) 0.71–0.88. For
+scale, two people scoring Rat6 20260720 pre agree at κ 0.80.
 
-Two scored sessions were left out of the fit:
+One scored session was left out of the fit:
 
 - **Rat5 20260721 pre** — scored 95% WAKE, and the model gets κ 0.13 on it,
   calling over 40% of that WAKE sleep. The features are z-scored within the
   session, which assumes the session holds a usual mix of states; **on a
   recording that is almost all wake the auto-score is not usable.**
-- **Rat6 20260727 pre** — its REM labels sit on slow-wave, theta-free LFP, and
-  the two people who scored it agree at only κ 0.51.
 
 On a new rat, compare the auto-score with some hand scoring before relying on
 it, and as more sessions are scored, refit on all of them and overwrite the
@@ -344,7 +340,7 @@ StateEditor(..., auto_states=states, auto_states_ts=timestamps)
 
 > **Validate across sessions.** An earlier model fitted to one hand-scored
 > session of one rat scored that session well (κ 0.82 held out) but did **not**
-> work on other recordings. The default model is fitted to 13 sessions of two
+> work on other recordings. The default model is fitted to 16 sessions of three
 > rats and checked on each with that session held out (see
 > [the default model](#automatic-scoring-the-default-model)); judge any refit
 > the same way.
@@ -470,7 +466,7 @@ arousals being missed are not high-burst seconds; they are genuinely faint ones.
 | `processing.py` | Preprocessing + multitaper spectrogram (reads LFP from NWB or `.npy`) |
 | `buzsaki_score.py` | Auto sleep scoring: the default fitted model, or Buzsáki thresholds (WAKE/NREM/REM) |
 | `fit_auto_score.py` | Fit the auto-scorer to hand-scored sessions → `sleep_score_model.npz` |
-| `models/sleep_score_model.npz` | The default model (13 hand-scored pre/post sessions, Rat5 + Rat6) |
+| `models/sleep_score_model.npz` | The default model (16 hand-scored pre/post sessions, Rat1 + Rat5 + Rat6) |
 | `sleep_nwb_store.py` | Session NWB I/O — the recording in, each scoring out |
 | `import_labels.py` | Put `results/` scorings into the session NWB |
 | `isolate_labels.py` | Take scorings back out (student copy + ground truth) |

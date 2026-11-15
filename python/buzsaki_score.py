@@ -26,13 +26,13 @@ States use the HM codes: 1 = WAKE, 3 = NREM, 5 = REM (0 = unscored).
 
 Two scorers live here, and **the default is the fitted model** shipped in
 ``models/sleep_score_model.npz`` (see ``fit_auto_score.py``), not this
-threshold scorer. It was fitted to the hand scoring of 13 pre/post sessions of
-Rat5 and Rat6 (six scorers), from each rat's cortex and pyr sleep channels (the
+threshold scorer. It was fitted to the hand scoring of 16 pre/post sessions of
+Rat1, Rat5 and Rat6 (seven scorers), from each rat's cortex and pyr sleep channels (the
 EEG is not used). Held out one session at a time it agrees with the scorer at
-kappa 0.75-0.89 with intermediate (0.83 pooled), and fitted on one rat it
-scores the other at 0.69-0.86. Two people scoring the same session agree at
+kappa 0.74-0.93 with intermediate (0.85 pooled), and with a whole rat held
+out it scores that rat at 0.71-0.94. Two people scoring the same session agree at
 0.80. It fails on a recording that is almost all wake (kappa 0.13), because
-its features are z-scored within the session. Two rats is still few, so check
+its features are z-scored within the session. Three rats is still few, so check
 it against hand scoring before relying on it for another rat;
 ``model=None`` (``--model none``) gives the threshold scorer, which needs no
 training at all.
@@ -456,7 +456,7 @@ def _load_motion(lfp_dir, fs):
 
 
 # The model every session is scored with unless told otherwise: fitted to
-# the hand scoring of 13 Rat5 + Rat6 pre/post sessions, cortex + pyr sleep
+# the hand scoring of 16 Rat1 + Rat5 + Rat6 pre/post sessions, cortex + pyr sleep
 # channels (fit_auto_score.py). Refit and
 # overwrite it as more sessions are hand-scored.
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "sleep_score_model.npz"
